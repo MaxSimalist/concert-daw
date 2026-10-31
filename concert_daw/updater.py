@@ -147,7 +147,10 @@ def download(info: UpdateInfo, progress=None) -> Path:
     """Скачать и распаковать во временную папку. Возвращает папку с файлами программы."""
     work = Path(tempfile.mkdtemp(prefix=f"{APP_DIR}_update_"))
     zpath = work / "update.zip"
-    with _request(info.url, accept="application/octet-stream") as r, open(zpath, "wb") as f:
+    # архив релиза (github.com) — как файл; архив исходников (api.github.com/zipball) понимает только
+    # стандартный заголовок API (с «octet-stream» GitHub отвечает ошибкой 415)
+    accept = "application/octet-stream" if info.asset else "application/vnd.github+json"
+    with _request(info.url, accept=accept) as r, open(zpath, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         done = 0
         while True:
