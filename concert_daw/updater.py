@@ -109,10 +109,38 @@ def _from_tags(repo: str) -> UpdateInfo:
         raise RuntimeError(f"нет связи с GitHub ({getattr(exc, 'reason', exc)})") from None
     names = [str(t.get("name", "")) for t in tags if re.match(r"^[vV]?\d+(\.\d+)*$", str(t.get("name", "")))]
     if not names:
-        raise RuntimeError("в репозитории ещё нет опубликованных версий")
+        return _from_branch(repo)              # ни релизов, ни меток — версия из основной ветки
     best = max(names, key=parse_version)
     return UpdateInfo(best.lstrip("vV"), "", f"{API}/repos/{repo}/zipball/{best}",
                       f"https://github.com/{repo}/tree/{best}", False)
+
+
+def _raw(repo: str, path: str, branch: str = "main") -> str:
+    with _request(f"https://raw.githubusercontent.com/{repo}/{branch}/{path}", accept="text/plain") as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def _from_branch(repo: str, branch: str = "main") -> UpdateInfo:
+    """Версия из version.py в основной ветке репозитория + описание из CHANGELOG.md."""
+    try:
+        text = _raw(repo, f"{APP_DIR}/version.py", branch)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError("в репозитории ещё нет опубликованных версий" if exc.code == 404
+                           else f"GitHub ответил ошибкой {exc.code}") from None
+    except (urllib.error.URLError, OSError) as exc:
+        raise RuntimeError(f"нет связи с GitHub ({getattr(exc, 'reason', exc)})") from None
+    m = re.search(r'^VERSION\s*=\s*["\']([^"\']+)["\']', text, re.M)
+    if not m:
+        raise RuntimeError("не удалось прочитать версию в репозитории")
+    notes = ""
+    try:
+        log = _raw(repo, "CHANGELOG.md", branch)
+        part = re.split(r"(?m)^## ", log)
+        notes = ("## " + part[1]).strip() if len(part) > 1 else ""
+    except Exception:
+        pass
+    return UpdateInfo(m.group(1), notes, f"{API}/repos/{repo}/zipball/{branch}",
+                      f"https://github.com/{repo}", False)
 
 
 def download(info: UpdateInfo, progress=None) -> Path:
