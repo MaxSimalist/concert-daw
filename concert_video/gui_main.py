@@ -298,7 +298,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.out_label)
         self.statusBar().addPermanentWidget(self.daw_label)
         self.update_btn = UpdateButton(self, self._update_blocker, lambda: self.project.update_checked,
-                                       self._set_update_checked)
+                                       self._set_update_checked, lambda: self.project.update_auto)
         self.statusBar().addPermanentWidget(self.update_btn)
 
     def _update_blocker(self) -> str:
@@ -1726,7 +1726,7 @@ class MainWindow(QMainWindow):
                 sp.setSizes(s)
 
     def open_settings(self) -> None:
-        dlg = SettingsDialog(self.project, self)
+        dlg = SettingsDialog(self.project, self, update_button=self.update_btn)
         if not dlg.exec():
             return
         old_ip, old_port = self.project.daw_ip, self.project.daw_port

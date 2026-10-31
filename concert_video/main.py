@@ -51,9 +51,7 @@ def install_error_log() -> None:
             if QApplication.instance() is not None:
                 state["dialog_open"] = True
                 try:
-                    QMessageBox.critical(None, "Concert Video — ошибка",
-                                         f"{exc_type.__name__}: {exc}\n\nПрограмма продолжает работать. "
-                                         f"Подробности в журнале:\n{log_path}")
+                    show_error_dialog("Concert Video", exc_type, exc, text, log_path)
                 finally:
                     state["dialog_open"] = False
         except Exception:
@@ -61,6 +59,22 @@ def install_error_log() -> None:
 
     sys.excepthook = hook
 
+
+
+def show_error_dialog(app_name: str, exc_type, exc, text: str, log_path) -> None:
+    """Окно ошибки с кнопкой «Сообщить об ошибке» (готовый отчёт с текстом ошибки)."""
+    from PySide6.QtWidgets import QMessageBox
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Critical)
+    box.setWindowTitle(f"{app_name} — ошибка")
+    box.setText(f"{exc_type.__name__}: {exc}")
+    box.setInformativeText(f"Программа продолжает работать. Подробности в журнале:\n{log_path}")
+    report = box.addButton("Сообщить об ошибке…", QMessageBox.ActionRole)
+    box.addButton("Закрыть", QMessageBox.RejectRole)
+    box.exec()
+    if box.clickedButton() is report:
+        from gui_feedback import FeedbackDialog
+        FeedbackDialog("bug", log_path, error_text=text).exec()
 
 def main() -> int:
     install_error_log()

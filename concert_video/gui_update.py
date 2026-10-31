@@ -52,7 +52,7 @@ class UpdateButton(QPushButton):
     """Кнопка в строке состояния: «v1.0.0» или «⬆ Обновление 1.1.0»."""
 
     def __init__(self, parent_window, can_quit: Callable[[], str], last_check_get: Callable[[], float],
-                 last_check_set: Callable[[float], None]):
+                 last_check_set: Callable[[float], None], auto_get: Callable[[], bool] = lambda: True):
         super().__init__(f"v{VERSION}")
         self.win = parent_window
         self.can_quit = can_quit
@@ -67,7 +67,7 @@ class UpdateButton(QPushButton):
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self._poll)
-        if REPO and not REPO.startswith("OWNER/") and time.time() - self.last_get() > 20 * 3600:
+        if REPO and not REPO.startswith("OWNER/") and auto_get() and time.time() - self.last_get() > 20 * 3600:
             QTimer.singleShot(10000, self._auto_check)
 
     def _auto_check(self) -> None:

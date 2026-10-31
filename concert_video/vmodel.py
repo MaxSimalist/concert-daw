@@ -173,6 +173,7 @@ class Project:
     master_muted: bool = False
     new_video_muted: bool = True   # новые видео без звука (звук концерта идёт из DAW)
     gpu_render: bool = True
+    update_auto: bool = True       # проверять обновления при запуске
     update_checked: float = 0.0    # когда последний раз проверяли обновления на GitHub        # эфир и проекторы рисует видеокарта (OpenGL)
 
     @classmethod

@@ -74,12 +74,14 @@ class SettingsResult:
     midi_port: str
     midi_map: dict
     midi_cc_any: bool
+    update_auto: bool = True
 
 
 class SettingsDialog(QDialog):
     def __init__(self, cfg: AppConfig, engine: AudioEngine, current_device_name: str, parent=None,
                  osc: X32Osc = None, midi: MidiController = None, initial_tab: str = "",
-                 fx_types: dict = None, console_names=None, video_clients: list = None):
+                 fx_types: dict = None, console_names=None, video_clients: list = None,
+                 update_button=None):
         super().__init__(parent)
         self.cfg = cfg
         self.engine = engine
@@ -105,6 +107,11 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(scrollable(self._build_osc_tab()), "Пульт X32 (сеть)")
         self.tabs.addTab(scrollable(self._build_midi_tab()), "MIDI")
         self.tabs.addTab(scrollable(self._build_video_tab()), "Видео")
+        from gui_feedback import build_updates_tab
+        from model import app_data_dir
+        upd_tab, self.update_auto_cb = build_updates_tab(self, update_button, cfg.update_auto,
+                                                         app_data_dir() / "error.log")
+        self.tabs.addTab(scrollable(upd_tab), "Обновления и отзывы")
         tab_index = {"ui": 0, "sound": 1, "playlist": 2, "rec": 3, "osc": 4, "midi": 5}
         if initial_tab in tab_index:
             self.tabs.setCurrentIndex(tab_index[initial_tab])
@@ -688,4 +695,5 @@ class SettingsDialog(QDialog):
             midi_port=(self.midi_port.currentData() or "") if MIDO_AVAILABLE else self.cfg.midi_port,
             midi_map=dict(self.midi_map),
             midi_cc_any=self.midi_cc_any.isChecked() if MIDO_AVAILABLE else self.cfg.midi_cc_any,
+            update_auto=self.update_auto_cb.isChecked(),
         )

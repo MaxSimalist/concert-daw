@@ -431,7 +431,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.video_label)
         self.statusBar().addPermanentWidget(self.audio_label)
         self.update_btn = UpdateButton(self, self._update_blocker, lambda: self.cfg.update_checked,
-                                       self._set_update_checked)
+                                       self._set_update_checked, lambda: self.cfg.update_auto)
         self.statusBar().addPermanentWidget(self.update_btn)
 
     def _update_blocker(self) -> str:
@@ -813,7 +813,7 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.cfg, self.engine, prev.name if prev else self.cfg.device_name, self,
                              osc=self.osc, midi=self.midi, initial_tab=tab, fx_types=self.fx_tempo.types,
                              console_names=self._console_channel_names,
-                             video_clients=self.sync.clients)
+                             video_clients=self.sync.clients, update_button=self.update_btn)
         accepted = bool(dlg.exec())
         if not accepted:
             self._apply_remote()   # диалог мог открыть другой MIDI-вход — возвращаем свой
@@ -844,6 +844,7 @@ class MainWindow(QMainWindow):
         c.osc_on, c.osc_ip, c.osc_when, c.osc_faders = r.osc_on, r.osc_ip, r.osc_when, r.osc_faders
         c.fx_tempo, c.silence_offer = r.fx_tempo, r.silence_offer
         c.fx_auto, c.fx_auto_div = r.fx_auto, r.fx_auto_div
+        c.update_auto = r.update_auto
         c.video_sync_on, c.video_sync_port = r.video_sync_on, r.video_sync_port
         self._apply_video_sync()
         if r.reset_layout:

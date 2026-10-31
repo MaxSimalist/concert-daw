@@ -533,7 +533,7 @@ class ConnectDialog(QDialog):
 # Настройки
 # ══════════════════════════════════════════════════════════════════════════════
 class SettingsDialog(QDialog):
-    def __init__(self, project: Project, parent=None):
+    def __init__(self, project: Project, parent=None, update_button=None):
         super().__init__(parent)
         self.setWindowTitle("Настройки Concert Video")
         self.p = project
@@ -690,6 +690,13 @@ class SettingsDialog(QDialog):
         f.addRow(st)
         tabs.addTab(scrollable(w), "Запись и трансляция")
 
+        # ── обновления и отзывы ────────────────────────────────────────────
+        from gui_feedback import build_updates_tab
+        from vmodel import app_data_dir
+        upd, self.update_auto = build_updates_tab(self, update_button, project.update_auto,
+                                                  app_data_dir() / "error.log")
+        tabs.addTab(scrollable(upd), "Обновления и отзывы")
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -722,6 +729,7 @@ class SettingsDialog(QDialog):
         p.video_delay_ms = self.delay.value()
         p.audio_out = self.audio_out.currentData() or ""
         p.gpu_render = self.gpu.isChecked()
+        p.update_auto = self.update_auto.isChecked()
         p.new_video_muted = self.new_muted.isChecked()
         p.unbound_action = self.unbound.currentData()
         p.out_w, p.out_h = self.out.currentData()
