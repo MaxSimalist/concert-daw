@@ -116,7 +116,7 @@ def _from_tags(repo: str) -> UpdateInfo:
 
 
 def _raw(repo: str, path: str, branch: str = "main") -> str:
-    with _request(f"https://raw.githubusercontent.com/{repo}/{branch}/{path}", accept="text/plain") as r:
+    with _request(f"{API}/repos/{repo}/contents/{path}?ref={branch}", accept="application/vnd.github.raw") as r:
         return r.read().decode("utf-8", "replace")
 
 
