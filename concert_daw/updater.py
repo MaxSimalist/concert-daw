@@ -82,7 +82,7 @@ def check(repo: str = REPO) -> UpdateInfo:
             rel = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            raise RuntimeError("в репозитории ещё нет опубликованных версий") from None
+            return _from_tags(repo)            # релизов нет — берём самую новую метку версии (тег)
         raise RuntimeError(f"GitHub ответил ошибкой {exc.code}") from None
     except (urllib.error.URLError, OSError) as exc:
         raise RuntimeError(f"нет связи с GitHub ({getattr(exc, 'reason', exc)})") from None
@@ -96,6 +96,23 @@ def check(repo: str = REPO) -> UpdateInfo:
     url = asset_url or str(rel.get("zipball_url", ""))
     return UpdateInfo(tag.lstrip("vV"), str(rel.get("body") or ""), url, str(rel.get("html_url", "")),
                       bool(asset_url))
+
+
+def _from_tags(repo: str) -> UpdateInfo:
+    """Версии по меткам (тегам) vX.Y.Z — если на GitHub не оформлен «релиз»."""
+    try:
+        with _request(f"{API}/repos/{repo}/tags?per_page=100") as r:
+            tags = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"GitHub ответил ошибкой {exc.code}") from None
+    except (urllib.error.URLError, OSError) as exc:
+        raise RuntimeError(f"нет связи с GitHub ({getattr(exc, 'reason', exc)})") from None
+    names = [str(t.get("name", "")) for t in tags if re.match(r"^[vV]?\d+(\.\d+)*$", str(t.get("name", "")))]
+    if not names:
+        raise RuntimeError("в репозитории ещё нет опубликованных версий")
+    best = max(names, key=parse_version)
+    return UpdateInfo(best.lstrip("vV"), "", f"{API}/repos/{repo}/zipball/{best}",
+                      f"https://github.com/{repo}/tree/{best}", False)
 
 
 def download(info: UpdateInfo, progress=None) -> Path:
