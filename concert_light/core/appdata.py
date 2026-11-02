@@ -27,7 +27,7 @@ class Settings:
         "daw_name": "",
         "auto_connect": True,
         "udmx_enabled": True,
-        "udmx_rate": 30,
+        "udmx_rate": 20,
     }
 
     def __init__(self, path: Path = None):

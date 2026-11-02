@@ -40,7 +40,7 @@ class MainWindow(QMainWindow):
         self._searching = False
         self._last_search = 0.0
         self.show_ = Show(library)
-        self.output = Output(rate=int(settings.udmx_rate or 30), log_path=app_data_dir() / "udmx.log")
+        self.output = Output(rate=int(settings.udmx_rate or 20), log_path=app_data_dir() / "udmx.log")
         self.engine = Engine(self.show_, self.output)
         self.hub = Hub()
 

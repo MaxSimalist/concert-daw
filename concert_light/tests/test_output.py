@@ -1,4 +1,4 @@
-"""Тест вывода на uDMX без устройства: поддельный pyusb + «капризный» uDMX.
+"""Тест вывода на uDMX без устройства: поддельный pyusb + «капризный» uDMX и управляемые часы.
 
 python tests/test_output.py
 """
@@ -16,9 +16,10 @@ sys.path.insert(0, ROOT)
 # ---------- поддельный pyusb ------------------------------------------------
 
 class USBError(IOError):
-    def __init__(self, msg, code=None):
+    def __init__(self, msg, code=None, errno=None):
         super().__init__(msg)
         self.backend_error_code = code
+        self.errno = errno
 
 
 class FakeDev:
@@ -26,16 +27,27 @@ class FakeDev:
 
     def __init__(self):
         self.transfers = []      # (first, data)
-        self.fail_next = 0       # сколько следующих посылок «уронить»
+        self.fail_next = 0       # сколько следующих посылок «уронить» (таймаут)
+        self.stalled = False     # прошивка «зависла»: каждая посылка — Errno 32, лечится сбросом
         self.gone = False
+        self.resets = 0
         self.dmx = bytearray(512)
 
     def get_active_configuration(self):
         return 1
 
+    def reset(self):
+        if self.gone:
+            raise USBError("Entity not found", code=-5, errno=2)
+        self.resets += 1
+        self.stalled = False
+        self.dmx = bytearray(512)     # после сброса uDMX всё забыл
+
     def ctrl_transfer(self, rt, req, wvalue, windex, data, timeout):
         if self.gone:
-            raise USBError("No such device (it may have been disconnected)", code=-4)
+            raise USBError("[Errno 2] Entity not found", code=-5, errno=2)
+        if self.stalled:
+            raise USBError("[Errno 32] Pipe error", code=-9, errno=32)
         if self.fail_next:
             self.fail_next -= 1
             raise USBError("[Errno 10060] Operation timed out", code=-7)
@@ -46,16 +58,30 @@ class FakeDev:
 
 
 DEVICES = []
+STATE = {"stale_ctx": False}       # «старый контекст libusb не видит вновь появившийся uDMX»
 usb = types.ModuleType("usb")
 usb.core = types.ModuleType("usb.core")
 usb.util = types.ModuleType("usb.util")
 usb.backend = types.ModuleType("usb.backend")
+usb.backend.libusb1 = types.ModuleType("usb.backend.libusb1")
+usb.backend.libusb1._lib_object = "ctx-1"
 usb.core.USBError = USBError
-usb.core.find = lambda find_all=True, **kw: list(DEVICES)
+
+
+def _find(find_all=True, **kw):
+    if STATE["stale_ctx"] and usb.backend.libusb1._lib_object is not None:
+        return []
+    STATE["stale_ctx"] = False
+    usb.backend.libusb1._lib_object = "ctx-new"
+    return list(DEVICES)
+
+
+usb.core.find = _find
 usb.util.CTRL_OUT, usb.util.CTRL_TYPE_VENDOR, usb.util.CTRL_RECIPIENT_DEVICE = 0, 0x40, 0
 usb.util.get_string = lambda dev, idx: "uDMX"
 usb.util.dispose_resources = lambda dev: None
-sys.modules.update({"usb": usb, "usb.core": usb.core, "usb.util": usb.util, "usb.backend": usb.backend})
+sys.modules.update({"usb": usb, "usb.core": usb.core, "usb.util": usb.util, "usb.backend": usb.backend,
+                    "usb.backend.libusb1": usb.backend.libusb1})
 
 from core import output as output_mod  # noqa: E402
 from core.output import Output  # noqa: E402
@@ -63,13 +89,37 @@ from core.output import Output  # noqa: E402
 assert output_mod._USB_OK, output_mod._USB_ERR
 
 
+class Clock:
+    t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+    def tick(self, dt):
+        self.t += dt
+
+
+CLOCK = Clock()
+output_mod.time.monotonic = CLOCK      # часы вывода — управляемые
+
+
 def make():
     dev = FakeDev()
     DEVICES[:] = [dev]
+    STATE["stale_ctx"] = False
     log = Path(tempfile.mkdtemp()) / "udmx.log"
     out = Output(rate=0, log_path=log)   # rate=0 — без ограничения частоты для теста
     out.limit = 300
     return dev, out, log
+
+
+def run(out, u, seconds, step=0.05, change=None):
+    """Крутить вывод seconds секунд по 50 мс (как движок), меняя канал change."""
+    for i in range(int(seconds / step)):
+        if change is not None:
+            u[change] = (u[change] + 1) % 256
+        out.send(u)
+        CLOCK.tick(step)
 
 
 def test_connect_and_chunks():
@@ -98,29 +148,68 @@ def test_transient_errors_do_not_disconnect():
         u[5] = step * 20
         dev.fail_next = 1 if step % 2 else 0                # каждая вторая посылка падает
         out.send(u)
+        CLOCK.tick(0.25)                                    # больше паузы после ошибки
     assert out.dev is not None and out.stats["reconnects"] == 0, out.stats
     u[5] = 255
     out.send(u)
     assert dev.dmx[5] == 255                               # несошедшее догнало
     assert out.stats["errors"] == 5
     assert "ошибка посылки" in log.read_text("utf-8")
-    print("одиночные сбои не рвут связь ok:", out.stats)
+    print("одиночные сбои не рвут связь ok:", out.stats["errors"], "ошибок")
 
 
-def test_long_failure_reconnects_and_resends_all():
+def test_backoff_after_error():
+    dev, out, _ = make()
+    u = bytearray(512)
+    out.send(u)
+    dev.fail_next = 1
+    u[1] = 1
+    out.send(u)                                            # ошибка
+    n = len(dev.transfers)
+    for _ in range(3):                                     # сразу после ошибки — не «добиваем»
+        u[1] += 1
+        out.send(u)
+        CLOCK.tick(0.05)
+    assert len(dev.transfers) == n
+    CLOCK.tick(0.1)
+    out.send(u)
+    assert len(dev.transfers) == n + 1 and dev.dmx[1] == u[1]
+    print("пауза после ошибки ok")
+
+
+def test_pipe_error_resets_port():
+    """Как в журнале: прошивка зависла — Errno 32 на каждую посылку. Лечим сбросом порта."""
     dev, out, log = make()
     u = bytearray(512)
     u[100] = 42
-    out.send(u)
-    dev.fail_next = Output.FAIL_LIMIT
-    for i in range(Output.FAIL_LIMIT):
-        u[1] = i + 1
-        out.send(u)
+    run(out, u, 1, change=0)
+    dev.stalled = True
+    run(out, u, 2, change=0)
+    assert dev.resets == 1 and out.stats["resets"] == 1 and out.stats["reconnects"] == 0, out.stats
+    assert out.connected and dev.dmx[100] == 42             # после сброса всё переслано
+    assert "сброс USB-порта" in log.read_text("utf-8")
+    print("Pipe error -> сброс USB-порта ok")
+
+
+def test_entity_not_found_needs_fresh_context():
+    """Как в журнале: uDMX пропал (Entity not found) и вернулся, но старый контекст его не видит."""
+    dev, out, log = make()
+    u = bytearray(512)
+    u[7] = 77
+    run(out, u, 0.5)
+    dev.gone = True
+    STATE["stale_ctx"] = True
+    run(out, u, 0.3, change=0)
     assert out.dev is None and out.stats["reconnects"] == 1
-    dev.dmx = bytearray(512)                                 # uDMX «перезагрузился» и всё забыл
-    out.send(u)                                              # переподключение сразу, без паузы
-    assert out.connected and dev.dmx[100] == 42, "после переподключения переслано всё"
-    print("долгий сбой -> переподключение и полная пересылка ok")
+    new = FakeDev()                                         # uDMX снова появился в системе
+    DEVICES[:] = [new]
+    run(out, u, 3)
+    assert out.dev is None, "старый контекст ещё не видит"
+    run(out, u, 4)                                          # после 5 с — новый контекст libusb
+    assert out.connected and new.dmx[7] == 77, out.status
+    text = log.read_text("utf-8")
+    assert "новый контекст libusb" in text and "снова найден" in text and "держалась" in text
+    print("Entity not found -> новый контекст libusb ok")
 
 
 def test_unplug_and_plug_back():
@@ -132,20 +221,32 @@ def test_unplug_and_plug_back():
     u[0] = 1
     out.send(u)
     assert out.dev is None and "потеряна" in out.status      # выдернули — сразу видно
-    out.send(u)
-    assert out.dev is None                                   # устройства нет — ждём
     new = FakeDev()
     DEVICES[:] = [new]
-    out._last_try = 0
     u[0] = 200
-    out.send(u)
+    run(out, u, 2.5)
     assert out.connected and new.dmx[0] == 200
     print("выдернули/вставили ok")
 
 
-def test_rate_limit():
+def test_long_failure_reconnects():
     dev, out, _ = make()
-    out.rate = 30
+    u = bytearray(512)
+    u[100] = 42
+    out.send(u)
+    dev.fail_next = 1000                                     # таймауты, не Pipe error
+    run(out, u, 3, change=1)
+    assert out.stats["reconnects"] >= 1
+    dev.fail_next = 0
+    dev.dmx = bytearray(512)
+    run(out, u, 3)
+    assert out.connected and dev.dmx[100] == 42
+    print("долгий сбой -> переподключение и полная пересылка ok")
+
+
+def test_rate_limit_and_driver_hint():
+    dev, out, _ = make()
+    out.rate = 20
     u = bytearray(512)
     out.send(u)
     n = len(dev.transfers)
@@ -153,13 +254,18 @@ def test_rate_limit():
         u[3] = i + 1
         out.send(u)
     assert len(dev.transfers) - n <= 1
-    print("ограничение частоты ok")
+    assert out.hint and "libusb-win32" in out.hint          # открыто через libusb-1.0 (WinUSB)
+    assert Output().rate == 20
+    print("ограничение частоты и подсказка о драйвере ok")
 
 
 if __name__ == "__main__":
     test_connect_and_chunks()
     test_transient_errors_do_not_disconnect()
-    test_long_failure_reconnects_and_resends_all()
+    test_backoff_after_error()
+    test_pipe_error_resets_port()
+    test_entity_not_found_needs_fresh_context()
     test_unplug_and_plug_back()
-    test_rate_limit()
+    test_long_failure_reconnects()
+    test_rate_limit_and_driver_hint()
     print("ВСЕ ТЕСТЫ ВЫВОДА ПРОЙДЕНЫ")

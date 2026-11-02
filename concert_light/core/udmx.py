@@ -67,6 +67,28 @@ def _backends():
     return out
 
 
+def fresh_usb_context():
+    """Новый контекст libusb-1.0 (как при перезапуске программы).
+
+    pyusb держит один контекст на всё время работы. После того как uDMX «отвалился»
+    и заново появился в системе (Errno 2 Entity not found), старый контекст на Windows
+    может его больше не увидеть — помогал только перезапуск программы."""
+    try:
+        import usb.backend.libusb1 as l1
+        l1._lib_object = None
+        return True
+    except Exception:
+        return False
+
+
+def driver_hint(backend_name):
+    """Подсказка по драйверу: uDMX сделан под libusb-win32."""
+    if backend_name == "libusb0":
+        return ""
+    return ("Драйвер uDMX сейчас WinUSB/libusbK. Для uDMX надёжнее родной драйвер libusb-win32: "
+            "Zadig → Options → List All Devices → uDMX → libusb-win32 → Replace Driver.")
+
+
 def _is_udmx(dev):
     """ID 16C0:05DC общий для V-USB устройств — по возможности проверяем строку продукта."""
     try:
@@ -156,6 +178,10 @@ class UDMX:
 
     def blackout(self):
         self.set_range(1, bytes(DMX_CHANNELS))
+
+    def reset(self):
+        """Сброс USB-порта uDMX — выводит прошивку из «зависания» (Errno 32 Pipe error)."""
+        self.dev.reset()
 
     def close(self):
         usb.util.dispose_resources(self.dev)

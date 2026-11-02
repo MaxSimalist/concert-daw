@@ -118,8 +118,8 @@ class UdmxTab(QWidget):
         self.rate = QSpinBox()
         self.rate.setRange(5, 44)
         self.rate.setSuffix(" раз/с")
-        self.rate.setValue(int(settings.udmx_rate or 30))
-        self.rate.setToolTip("Как часто слать изменения на uDMX. Если связь рвётся — уменьшите до 20–25.")
+        self.rate.setValue(int(settings.udmx_rate or 20))
+        self.rate.setToolTip("Как часто слать изменения на uDMX. Если связь рвётся — уменьшите до 10–15.")
         self.rate.valueChanged.connect(lambda v: setattr(output, "rate", v))
         f.addRow("Частота отправки:", self.rate)
         row = QHBoxLayout()
@@ -159,9 +159,11 @@ class UdmxTab(QWidget):
         self.state.setText(f"<span style='color:{color}'>●</span> {o.status}")
         st = o.stats
         txt = (f"Каналов в работе: {o.limit}. Посылок: {st['sent']}, ошибок: {st['errors']}, "
-               f"переподключений: {st['reconnects']}.")
+               f"сбросов USB: {st['resets']}, переподключений: {st['reconnects']}.")
         if st["last_error"]:
             txt += f"\nПоследняя ошибка: {st['last_error']}"
+        if o.hint:
+            txt += f"\n⚠ {o.hint}"
         self.stats.setText(txt)
 
     def _open_log(self):
