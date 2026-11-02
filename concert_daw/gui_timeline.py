@@ -421,6 +421,8 @@ class TimelinePanel(QWidget):
         self.zoom.setValue(pps_to_zoom(20.0))
         self.zoom.setFixedWidth(150)
         self.zoom.setToolTip("Масштаб времени (колесо мыши над ползунком — плавно)")
+        self._auto_fit = True       # «по размеру»: весь трек в окне, пока масштаб не трогали вручную
+        self._fitting = False
         self.zoom.valueChanged.connect(self._on_zoom)
         bar.addWidget(self.zoom)
         fit = QPushButton(" По размеру")
@@ -540,6 +542,7 @@ class TimelinePanel(QWidget):
         self.song, self.samplerate = song, samplerate
         if changed:
             self.reset_loop()
+            self._auto_fit = True              # новый трек — снова целиком
         self._update_markers()
         self._rebuild()
 
@@ -649,6 +652,7 @@ class TimelinePanel(QWidget):
             return
         self.rec_folder = folder
         self.rec_info = load_session(folder)
+        self._auto_fit = True
         if self.rec_combo.findData(folder) < 0:
             self.refresh_recordings(folder)
         else:
@@ -783,8 +787,12 @@ class TimelinePanel(QWidget):
         self.hscroll.setRange(0, int(max(0.0, self.view.duration - self._visible_seconds() + 2) * 10))
         self.hscroll.setPageStep(int(self._visible_seconds() * 10))
         self.view.changed.emit()
+        if self._auto_fit and not self._fitting:
+            self._apply_fit()
 
     def _on_zoom(self, v: int) -> None:
+        if not self._fitting:
+            self._auto_fit = False             # масштаб поменяли руками — больше сами не подгоняем
         center = self.view.start + self._visible_seconds() / 2
         self.view.pps = zoom_to_pps(v)
         self.view.start = max(0.0, center - self._visible_seconds() / 2)
@@ -796,9 +804,27 @@ class TimelinePanel(QWidget):
         self.view.changed.emit()
 
     def fit(self) -> None:
-        pps = self.ruler.width() / max(1.0, self.view.duration)
-        self.zoom.setValue(pps_to_zoom(pps))
-        self.hscroll.setValue(0)
+        """Кнопка «по размеру»: весь трек в окне — и дальше держать так (при смене размера окна)."""
+        self._auto_fit = True
+        self._apply_fit()
+
+    def _apply_fit(self) -> None:
+        if self.ruler.width() < 50:
+            return                             # окно ещё не показано — подгоним при показе
+        self._fitting = True
+        try:
+            pps = self.ruler.width() / max(1.0, self.view.duration)
+            v = pps_to_zoom(pps)
+            while v > 0 and zoom_to_pps(v) > pps:     # чуть мельче, чтобы конец трека точно влез
+                v -= 1
+            if self.zoom.value() != v:
+                self.zoom.setValue(v)
+            self.view.pps = zoom_to_pps(v)
+            self.view.start = 0.0
+            self.hscroll.setValue(0)
+            self.view.changed.emit()
+        finally:
+            self._fitting = False
 
     def set_playhead(self, t: float, playing: bool) -> None:
         if abs(t - self.view.playhead) < 1e-4 and not playing:
