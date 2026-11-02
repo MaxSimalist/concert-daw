@@ -4,7 +4,7 @@ about: Предложить, что добавить или изменить
 title: "[Идея] "
 ---
 
-**Программа:** (Concert DAW / Concert Video)
+**Программа:** (Concert DAW / Concert Video / Concert Light)
 
 **Что хотелось бы:**
 

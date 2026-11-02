@@ -1,0 +1,62 @@
+{
+  "name": "Generic Wash Moving Head RGBW 14ch",
+  "manufacturer": "Generic",
+  "channels": [
+    {
+      "attr": "pan",
+      "default": 128
+    },
+    {
+      "attr": "pan_fine",
+      "default": 0
+    },
+    {
+      "attr": "tilt",
+      "default": 128
+    },
+    {
+      "attr": "tilt_fine",
+      "default": 0
+    },
+    {
+      "attr": "pt_speed",
+      "default": 0
+    },
+    {
+      "attr": "dimmer",
+      "default": 0
+    },
+    {
+      "attr": "strobe",
+      "default": 0
+    },
+    {
+      "attr": "red",
+      "default": 0
+    },
+    {
+      "attr": "green",
+      "default": 0
+    },
+    {
+      "attr": "blue",
+      "default": 0
+    },
+    {
+      "attr": "white",
+      "default": 0
+    },
+    {
+      "attr": "color_macro",
+      "default": 0
+    },
+    {
+      "attr": "mode",
+      "default": 0
+    },
+    {
+      "attr": "reset",
+      "default": 0
+    }
+  ]
+}

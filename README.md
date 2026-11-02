@@ -1,21 +1,23 @@
-# Concert DAW + Concert Video
+# Concert DAW + Concert Video + Concert Light
 
-Две программы для концертов и мероприятий (Windows 10/11):
+Три программы для концертов и мероприятий (Windows 10/11):
 
 | Программа | Компьютер | Что делает |
 |---|---|---|
 | **[Concert DAW](concert_daw/README.md)** | со звуком, пульт Behringer X32 по USB | Мультитреки на выходы пульта, плейлисты, запись, EQ/компрессор, метроном |
 | **[Concert Video](concert_video/README.md)** | с проекторами / экранами сцены | Видео и сцены на экраны (как OBS), синхронно с треками Concert DAW, расписание |
+| **[Concert Light](concert_light/README.md)** *(бета)* | с USB-DMX интерфейсом uDMX (можно тот же, что со звуком) | Свет: приборы, сцены, чейзы, эффекты, таймлайн песни синхронно с треками Concert DAW |
 
-Concert DAW — ведущий: нажали PLAY — видео на экранах идёт ровно с трека. Concert Video
-можно использовать и отдельно (сцены, расписание по времени).
+Concert DAW — ведущий: нажали PLAY — видео на экранах и свет идут ровно с трека.
+Concert Video и Concert Light можно использовать и отдельно.
 
 ## Установка
 
 1. Скачайте программы: зелёная кнопка **Code → Download ZIP** вверху страницы
    (или архив нужной программы на странице **Releases**, если он там есть).
 2. Распакуйте и скопируйте нужную папку на компьютер, например `concert_daw` → `C:\Concert DAW`,
-   `concert_video` → `C:\Concert Video`.
+   `concert_video` → `C:\Concert Video`,
+   `concert_light` → `C:\Concert Light`.
 3. Запустите **install.bat** в папке программы — он сам поставит Python и всё нужное
    и создаст ярлык на рабочем столе.
 

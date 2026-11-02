@@ -1,0 +1,30 @@
+{
+  "name": "Generic Scanner 6ch",
+  "manufacturer": "Generic",
+  "channels": [
+    {
+      "attr": "pan",
+      "default": 128
+    },
+    {
+      "attr": "tilt",
+      "default": 128
+    },
+    {
+      "attr": "color_wheel",
+      "default": 0
+    },
+    {
+      "attr": "gobo",
+      "default": 0
+    },
+    {
+      "attr": "strobe",
+      "default": 0
+    },
+    {
+      "attr": "dimmer",
+      "default": 0
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "Generic Dimmer 1ch",
+  "manufacturer": "Generic",
+  "channels": [
+    {
+      "attr": "dimmer",
+      "default": 0
+    }
+  ]
+}

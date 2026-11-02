@@ -4,7 +4,7 @@ about: Что-то работает не так
 title: "[Ошибка] "
 ---
 
-**Программа и версия:** (Concert DAW / Concert Video, версия внизу окна)
+**Программа и версия:** (Concert DAW / Concert Video / Concert Light, версия внизу окна)
 
 **Что произошло:**
 

@@ -1,0 +1,34 @@
+{
+  "name": "Generic RGB PAR 7ch",
+  "manufacturer": "Generic",
+  "channels": [
+    {
+      "attr": "dimmer",
+      "default": 0
+    },
+    {
+      "attr": "red",
+      "default": 0
+    },
+    {
+      "attr": "green",
+      "default": 0
+    },
+    {
+      "attr": "blue",
+      "default": 0
+    },
+    {
+      "attr": "strobe",
+      "default": 0
+    },
+    {
+      "attr": "mode",
+      "default": 0
+    },
+    {
+      "attr": "speed",
+      "default": 0
+    }
+  ]
+}

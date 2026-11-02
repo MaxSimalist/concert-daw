@@ -1,0 +1,18 @@
+{
+  "name": "Generic RGB PAR 3ch",
+  "manufacturer": "Generic",
+  "channels": [
+    {
+      "attr": "red",
+      "default": 0
+    },
+    {
+      "attr": "green",
+      "default": 0
+    },
+    {
+      "attr": "blue",
+      "default": 0
+    }
+  ]
+}

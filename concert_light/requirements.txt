@@ -1,0 +1,3 @@
+PySide6>=6.5          # интерфейс, аудио для таймлайна (Qt Multimedia)
+pyusb>=1.2            # связь с uDMX по USB
+libusb-package>=1.0   # библиотека libusb для pyusb (своя, ставить отдельно не нужно)
