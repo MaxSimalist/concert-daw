@@ -14,6 +14,7 @@ import threading
 import time
 
 from .fixtures import COLOR_ATTRS, is_snap
+from .show import MIN_STEP, scene_steps, set_scene_steps, step_time
 
 FPS = 40
 
@@ -36,6 +37,8 @@ class Engine:
         self._fade_time = 0.0
 
         self.chase = None             # активный чейз (копия данных + позиция)
+        self.seq = None               # идут шаги сцены: {"name", "steps", "index", "next", "loop"}
+        self._seq_done = False        # шаги «один раз» дошли до конца
         self.effects = {}             # name -> (params, start_time)
 
         self.state = {}               # итоговые значения (для монитора в UI)
@@ -90,29 +93,74 @@ class Engine:
             out[fid] = o
         return out
 
-    def go_scene(self, name, fade=None):
+    def _go_values(self, values, fade, now=None):
+        """Перейти к значениям (шаг сцены) с фейдом."""
+        # «последнее действие главнее»: то, что задаёт сцена, убираем из программера,
+        # иначе забытые в программере значения перекрывают сцену и она «не включается»
+        for fid, attrs in values.items():
+            prog = self.programmer.get(fid)
+            if prog:
+                for a in attrs:
+                    prog.pop(a, None)
+                if not prog:
+                    del self.programmer[fid]
+        now = time.monotonic() if now is None else now
+        cur = self._scene_layer(now)
+        self._from = cur
+        # «трекинг»: атрибуты, которых нет в шаге, остаются как были
+        self._to = self._merge(cur, values)
+        self._fade_start = now
+        self._fade_time = max(0.0, float(fade))
+
+    def go_scene(self, name, fade=None, sequence=True, step=0):
+        """Включить сцену. Если в ней несколько шагов — они пойдут по очереди
+        (sequence=False — только один шаг, так сцены вызывает чейз)."""
         sc = self.show.scenes.get(name)
         if sc is None:
             return False
+        steps = scene_steps(sc)
+        step = max(0, min(step, len(steps) - 1))
         with self.lock:
-            # «последнее действие главнее»: то, что задаёт сцена, убираем из программера,
-            # иначе забытые в программере значения перекрывают сцену и она «не включается»
-            for fid, attrs in sc["values"].items():
-                prog = self.programmer.get(fid)
-                if prog:
-                    for a in attrs:
-                        prog.pop(a, None)
-                    if not prog:
-                        del self.programmer[fid]
             now = time.monotonic()
-            cur = self._scene_layer(now)
-            self._from = cur
-            # «трекинг»: атрибуты, которых нет в сцене, остаются как были
-            self._to = self._merge(cur, sc["values"])
-            self._fade_start = now
-            self._fade_time = float(sc.get("fade", 0.0) if fade is None else fade)
+            first = steps[step]
+            f = float(first.get("fade", 0.0)) if fade is None else float(fade)
+            self._go_values(first["values"], f, now)
             self.current_scene = name
+            self.seq = None
+            self._seq_done = False
+            if sequence and len(steps) > 1:
+                hold = float(first.get("hold", 0.0))
+                self.seq = {"name": name, "steps": [dict(s) for s in steps], "index": step,
+                            "next": now + max(MIN_STEP, f + hold), "loop": bool(sc.get("loop", True))}
         return True
+
+    def scene_progress(self):
+        """(номер шага с 1, всего шагов) для включённой сцены, или None."""
+        with self.lock:
+            if self.seq:
+                return self.seq["index"] + 1, len(self.seq["steps"])
+            sc = self.show.scenes.get(self.current_scene) if self.current_scene else None
+            if sc and sc.get("steps"):
+                return len(sc["steps"]) if self._seq_done else 1, len(sc["steps"])
+            return None
+
+    def _tick_seq(self, now):
+        sq = self.seq
+        if not sq or now < sq["next"]:
+            return
+        idx = sq["index"] + 1
+        if idx >= len(sq["steps"]):
+            if not sq["loop"]:
+                self.seq = None          # один раз: остаёмся на последнем шаге
+                self._seq_done = True
+                return
+            idx = 0
+        sq["index"] = idx
+        step = sq["steps"][idx]
+        self._go_values(step["values"], float(step.get("fade", 0.0)), now)
+        sq["next"] += step_time(step)
+        if now - sq["next"] > step_time(step):  # отстали (например, компьютер подвис)
+            sq["next"] = now + step_time(step)
 
     def release(self, fade=1.0):
         """Плавно вернуть слой сцен к значениям по умолчанию (всё погасить)."""
@@ -124,6 +172,7 @@ class Engine:
             self._fade_time = float(fade)
             self.current_scene = None
             self.chase = None
+            self.seq = None
 
     def release_all(self, fade=1.0):
         with self.lock:
@@ -165,28 +214,59 @@ class Engine:
         записываются ВСЕ их каналы так, как они сейчас выглядят (сцена + программер, без эффектов).
         full=False — только тронутые в программере атрибуты (для сцен-«слоёв»: отдельно цвет,
         отдельно позиция)."""
+        values = self.snapshot_values(full)
+        if values is None:
+            return False
         with self.lock:
-            fids = [fid for fid, v in self.programmer.items() if v]
-            if not fids:
-                return False
-            if full:
-                base = self._scene_layer(time.monotonic())
-                values = {}
-                for fid in fids:
-                    st = dict(base.get(fid, {}))
-                    st.update(self.programmer[fid])
-                    values[fid] = st
-            else:
-                values = copy.deepcopy(self.programmer)
             self.show.scenes[name] = {"fade": float(fade), "values": values}
             return True
 
-    def load_scene_to_programmer(self, name):
+    def load_scene_to_programmer(self, name, step=0):
         sc = self.show.scenes.get(name)
         if sc is None:
             return
+        steps = scene_steps(sc)
         with self.lock:
-            self.programmer = copy.deepcopy(sc["values"])
+            self.programmer = copy.deepcopy(steps[max(0, min(step, len(steps) - 1))]["values"])
+
+    def snapshot_values(self, full=True):
+        """Значения программера для записи (full — все каналы тронутых приборов, как сейчас видно)."""
+        with self.lock:
+            fids = [fid for fid, v in self.programmer.items() if v]
+            if not fids:
+                return None
+            if not full:
+                return copy.deepcopy({fid: self.programmer[fid] for fid in fids})
+            base = self._scene_layer(time.monotonic())
+            values = {}
+            for fid in fids:
+                st = dict(base.get(fid, {}))
+                st.update(self.programmer[fid])
+                values[fid] = st
+            return values
+
+    def record_step(self, name, fade=1.0, hold=1.0, full=True, index=None):
+        """Добавить шаг в сцену (index — заменить шаг с этим номером). Сцены нет — создать.
+        Возвращает номер шага (с 1) или 0, если программер пуст."""
+        values = self.snapshot_values(full)
+        if values is None:
+            return 0
+        with self.lock:
+            new = {"values": values, "fade": float(fade), "hold": float(hold)}
+            sc = self.show.scenes.get(name)
+            if sc is None:
+                sc = self.show.scenes[name] = {"values": values, "fade": float(fade)}
+                steps = [new]
+            else:
+                steps = [dict(s) for s in scene_steps(sc)]
+                if index is not None and 0 <= index < len(steps):
+                    steps[index] = new
+                else:
+                    if len(steps) == 1 and not float(steps[0].get("hold", 0)):
+                        steps[0]["hold"] = float(hold)   # обычная сцена стала шагом 1 — не «мелькать»
+                    steps.append(new)
+            set_scene_steps(sc, steps)
+            return (index + 1) if index is not None and 0 <= index < len(steps) else len(steps)
 
     # ------------------------------------------------------------------
     # чейзы
@@ -197,6 +277,7 @@ class Engine:
         if not ch or not ch.get("steps"):
             return False
         with self.lock:
+            self.seq = None
             self.chase = {
                 "name": name,
                 "steps": list(ch["steps"]),
@@ -221,7 +302,7 @@ class Engine:
         if not ch or now < ch["next"]:
             return
         ch["index"] = (ch["index"] + 1) % len(ch["steps"])
-        self.go_scene(ch["steps"][ch["index"]], fade=ch["step_time"] * ch["fade"])
+        self.go_scene(ch["steps"][ch["index"]], fade=ch["step_time"] * ch["fade"], sequence=False)
         ch["next"] += ch["step_time"]
         if now - ch["next"] > ch["step_time"]:  # отстали (например, после паузы)
             ch["next"] = now + ch["step_time"]
@@ -288,6 +369,7 @@ class Engine:
         now = time.monotonic() if now is None else now
         with self.lock:
             self._tick_chase(now)
+            self._tick_seq(now)
             state = self._scene_layer(now)
             for fid, attrs in self.programmer.items():
                 if fid in state:

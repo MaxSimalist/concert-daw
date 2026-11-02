@@ -2,8 +2,8 @@
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSplitter,
+    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout,
+    QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSplitter,
     QVBoxLayout, QWidget,
 )
 
@@ -61,14 +61,28 @@ class ProgrammerTab(QWidget):
             quick.addWidget(b)
         rl.addLayout(quick)
 
-        rec = QGroupBox("Записать сцену из программера")
-        rg = QHBoxLayout(rec)
-        self.scene_name = QLineEdit()
-        self.scene_name.setPlaceholderText("Название сцены")
+        rec = QGroupBox("Записать из программера")
+        rv = QVBoxLayout(rec)
+        rg = QHBoxLayout()
+        rv.addLayout(rg)
+        self.scene_name = QComboBox()
+        self.scene_name.setEditable(True)
+        self.scene_name.setMinimumWidth(200)
+        self.scene_name.lineEdit().setPlaceholderText("Название сцены")
+        self.scene_name.currentTextChanged.connect(self._name_changed)
         self.fade = QDoubleSpinBox()
         self.fade.setRange(0, 60)
         self.fade.setValue(1.0)
-        self.fade.setSuffix(" с фейд")
+        self.fade.setPrefix("фейд ")
+        self.fade.setSuffix(" с")
+        self.fade.setToolTip("За сколько секунд плавно перейти к этой картинке")
+        self.hold = QDoubleSpinBox()
+        self.hold.setRange(0, 600)
+        self.hold.setValue(1.0)
+        self.hold.setPrefix("пауза ")
+        self.hold.setSuffix(" с")
+        self.hold.setToolTip("Для шагов: сколько секунд стоять на шаге после фейда, "
+                             "прежде чем перейти к следующему")
         self.full = QCheckBox("все каналы приборов")
         self.full.setChecked(True)
         self.full.setToolTip("Включено: записывается всё, что сейчас видно на выбранных приборах "
@@ -77,10 +91,21 @@ class ProgrammerTab(QWidget):
                              "(отдельно цвет, отдельно позиция).")
         self.clear_after = QCheckBox("очистить программер")
         self.clear_after.setChecked(True)
-        b_rec = QPushButton("● Записать")
-        b_rec.clicked.connect(self._record)
-        for w in (self.scene_name, self.fade, self.full, self.clear_after, b_rec):
+        for w in (self.scene_name, self.fade, self.hold, self.full, self.clear_after):
             rg.addWidget(w)
+        br = QHBoxLayout()
+        rv.addLayout(br)
+        b_rec = QPushButton("● Записать как сцену")
+        b_rec.setToolTip("Новая сцена из одного шага (или перезаписать сцену целиком)")
+        b_rec.clicked.connect(self._record)
+        b_step = QPushButton("+ Добавить шаг в сцену")
+        b_step.setToolTip("Добавить текущую картинку следующим шагом. Сцены нет — она создастся.\n"
+                          "Нажали сцену — шаги пойдут по очереди: фейд, пауза, следующий шаг…")
+        b_step.clicked.connect(self._add_step)
+        self.steps_info = QLabel()
+        for w in (b_rec, b_step):
+            br.addWidget(w)
+        br.addWidget(self.steps_info, 1)
         rl.addWidget(rec)
         split.addWidget(right)
         split.setSizes([260, 800])
@@ -89,8 +114,11 @@ class ProgrammerTab(QWidget):
         lay.addWidget(split)
         hub.changed.connect(self._on_changed)
         self.refresh_fixtures()
+        self._fill_names()
 
     def _on_changed(self, kind):
+        if kind in ("scenes", "all"):
+            self._fill_names()
         if kind in ("patch", "all"):
             self.refresh_fixtures()
         elif kind == "programmer":
@@ -204,8 +232,57 @@ class ProgrammerTab(QWidget):
         self.engine.clear_programmer()
         self._rebuild()
 
+    def _fill_names(self):
+        cur = self.scene_name.currentText()
+        self.scene_name.blockSignals(True)
+        self.scene_name.clear()
+        self.scene_name.addItems(list(self.show_.scenes))
+        self.scene_name.setEditText(cur)
+        self.scene_name.blockSignals(False)
+        self._name_changed(cur)
+
+    def _name_changed(self, name):
+        from core.show import scene_steps
+        sc = self.show_.scenes.get(name.strip())
+        if sc is None:
+            self.steps_info.setText("новая сцена" if name.strip() else "")
+        else:
+            n = len(scene_steps(sc))
+            self.steps_info.setText(f"в сцене шагов: {n} — «+ шаг» добавит шаг {n + 1}")
+
+    def _warn_dark(self, name, values):
+        dark = [self.show_.fixture(fid).name for fid, v in values.items()
+                if self.show_.fixture(fid) and v.get("dimmer", 1) == 0]
+        if dark:
+            QMessageBox.information(
+                self, "Сцена", f"«{name}» записано, но у приборов {', '.join(dark[:5])}"
+                f"{' и др.' if len(dark) > 5 else ''} диммер = 0 — они будут тёмными.\n"
+                "Поднимите «Диммер» (или кнопку «Полный») и запишите ещё раз.")
+
+    def _after_record(self, keep_name):
+        if self.clear_after.isChecked():
+            self.engine.clear_programmer()
+            self._rebuild()
+        if not keep_name:
+            self.scene_name.setEditText("")
+        self.hub.changed.emit("scenes")
+        self._fill_names()
+
+    def _add_step(self):
+        from core.show import scene_steps
+        name = self.scene_name.currentText().strip()
+        if not name:
+            QMessageBox.warning(self, "Шаг", "Введите или выберите название сцены")
+            return
+        n = self.engine.record_step(name, self.fade.value(), self.hold.value(), full=self.full.isChecked())
+        if not n:
+            QMessageBox.warning(self, "Шаг", "Программер пуст — сначала выставьте значения")
+            return
+        self._warn_dark(f"Шаг {n} сцены «{name}»", scene_steps(self.show_.scenes[name])[n - 1]["values"])
+        self._after_record(keep_name=True)              # следующий шаг — в ту же сцену
+
     def _record(self):
-        name = self.scene_name.text().strip()
+        name = self.scene_name.currentText().strip()
         if not name:
             QMessageBox.warning(self, "Сцена", "Введите название сцены")
             return
@@ -215,16 +292,5 @@ class ProgrammerTab(QWidget):
         if not self.engine.record_scene(name, self.fade.value(), full=self.full.isChecked()):
             QMessageBox.warning(self, "Сцена", "Программер пуст — сначала выставьте значения")
             return
-        sc = self.show_.scenes[name]["values"]
-        dark = [self.show_.fixture(fid).name for fid, v in sc.items()
-                if self.show_.fixture(fid) and v.get("dimmer", 1) == 0]
-        if dark:
-            QMessageBox.information(
-                self, "Сцена", f"Сцена «{name}» записана, но у приборов {', '.join(dark[:5])}"
-                f"{' и др.' if len(dark) > 5 else ''} диммер = 0 — они будут тёмными.\n"
-                "Поднимите «Диммер» (или кнопку «Полный») и запишите сцену ещё раз.")
-        if self.clear_after.isChecked():
-            self.engine.clear_programmer()
-            self._rebuild()
-        self.scene_name.clear()
-        self.hub.changed.emit("scenes")
+        self._warn_dark(f"Сцена «{name}»", self.show_.scenes[name]["values"])
+        self._after_record(keep_name=False)

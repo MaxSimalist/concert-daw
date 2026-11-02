@@ -5,11 +5,11 @@ import copy
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
-    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QCheckBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog,
+    QLabel, QListWidget, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from core.show import scene_rgb
+from core.show import scene_rgb, scene_steps, set_scene_steps
 
 
 def rename_refs(show, kind, old, new):
@@ -43,10 +43,16 @@ class SceneButton(QPushButton):
         self.color = color
         self.on = None
         self.selected = False
+        self._label = name
         self.setMinimumSize(140, 64)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setFocusPolicy(Qt.NoFocus)
         self.set_state(False, False)
+
+    def set_label(self, text):
+        if text != self._label:
+            self._label = text
+            self.setText(text)
 
     def set_state(self, on, selected):
         if (on, selected) == (self.on, self.selected):
@@ -91,17 +97,46 @@ class ScenesTab(QWidget):
 
         side = QVBoxLayout()
         self.box = QGroupBox("Выбранная сцена")
-        form = QFormLayout(self.box)
+        bl = QVBoxLayout(self.box)
+        bl.addWidget(QLabel("Шаги сцены:"))
+        self.steps = QListWidget()
+        self.steps.setMaximumHeight(170)
+        self.steps.currentRowChanged.connect(self._step_selected)
+        self.steps.itemDoubleClicked.connect(lambda _i: self._show_step())
+        bl.addWidget(self.steps)
+        tf = QFormLayout()
         self.fade = QDoubleSpinBox()
         self.fade.setRange(0, 60)
         self.fade.setSuffix(" с")
-        self.fade.valueChanged.connect(self._fade_changed)
-        form.addRow("Фейд", self.fade)
-        for text, slot in (("В программер (для правки)", self._to_programmer), ("Переименовать", self._rename),
-                           ("Дублировать", self._duplicate), ("Удалить", self._delete)):
+        self.fade.valueChanged.connect(self._timing_changed)
+        self.hold = QDoubleSpinBox()
+        self.hold.setRange(0, 600)
+        self.hold.setSuffix(" с")
+        self.hold.setToolTip("Сколько стоять на шаге после фейда, прежде чем перейти к следующему")
+        self.hold.valueChanged.connect(self._timing_changed)
+        tf.addRow("Фейд шага", self.fade)
+        tf.addRow("Пауза шага", self.hold)
+        bl.addLayout(tf)
+        self.loop = QCheckBox("Шаги по кругу (выкл — один раз и стоп на последнем)")
+        self.loop.toggled.connect(self._loop_changed)
+        bl.addWidget(self.loop)
+        grid = QGridLayout()
+        for i, (text, slot) in enumerate((
+                ("▶ Показать шаг", self._show_step), ("Шаг в программер", self._to_programmer),
+                ("Заменить из программера", self._replace_step), ("Дублировать шаг", self._dup_step),
+                ("↑ Выше", lambda: self._move_step(-1)), ("↓ Ниже", lambda: self._move_step(1)),
+                ("Удалить шаг", self._del_step))):
             b = QPushButton(text)
             b.clicked.connect(slot)
-            form.addRow(b)
+            grid.addWidget(b, i // 2, i % 2)
+        bl.addLayout(grid)
+        srow = QHBoxLayout()
+        for text, slot in (("Переименовать", self._rename), ("Дублировать сцену", self._duplicate),
+                           ("Удалить сцену", self._delete)):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            srow.addWidget(b)
+        bl.addLayout(srow)
         side.addWidget(self.box)
 
         rel = QGroupBox("Сброс")
@@ -115,9 +150,9 @@ class ScenesTab(QWidget):
         b.clicked.connect(self._release)
         rf.addRow(b)
         side.addWidget(rel)
-        side.addWidget(QLabel("Щелчок по сцене — включить (кнопка\nзагорается), ещё раз — выключить.\n"
-                              "Белая рамка — сцена, выбранная\nдля правки (настройки выше).\n"
-                              "Правка сцены: «В программер» →\nизменить → записать под тем же именем."))
+        side.addWidget(QLabel("Щелчок по сцене — включить (кнопка загорается),\nещё раз — выключить. "
+                              "Белая рамка — сцена\nдля правки. Шаги записываются на вкладке\n"
+                              "«Программер» кнопкой «+ Добавить шаг в сцену»."))
         side.addStretch()
         lay.addLayout(side)
 
@@ -163,8 +198,25 @@ class ScenesTab(QWidget):
 
     def _highlight(self):
         active = self.engine.current_scene
+        prog = self.engine.scene_progress() if active else None
         for btn in self.buttons:
-            btn.set_state(btn.name == active, btn.name == self.selected)
+            on = btn.name == active
+            sc = self.show_.scenes.get(btn.name)
+            n = len(scene_steps(sc)) if sc else 1
+            if on and prog and prog[1] > 1:
+                btn.set_label(f"{btn.name}\n▶ шаг {prog[0]}/{prog[1]}")
+            elif n > 1:
+                btn.set_label(f"{btn.name}\nшагов: {n}")
+            else:
+                btn.set_label(btn.name)
+            btn.set_state(on, btn.name == self.selected)
+        if active and active == self.selected and prog and self.engine.seq:
+            row = prog[0] - 1
+            if self.steps.currentRow() != row and not self.steps.hasFocus():
+                self.steps.blockSignals(True)
+                self.steps.setCurrentRow(row)
+                self.steps.blockSignals(False)
+                self._step_selected(row)
 
     def _go(self, name):
         if name not in self.show_.scenes:
@@ -182,25 +234,120 @@ class ScenesTab(QWidget):
         self._highlight()                               # кнопка меняет цвет сразу, без задержки
         self.hub.changed.emit("programmer")             # сцена могла убрать значения из программера
 
-    def _selected(self):
+    def _selected(self, keep_row=None):
         name = self.selected
         self.box.setTitle(f"Сцена «{name}»" if name else "Выбранная сцена")
         self.box.setEnabled(bool(name))
-        self.fade.blockSignals(True)
-        self.fade.setValue(self.show_.scenes[name].get("fade", 0) if name in self.show_.scenes else 0)
-        self.fade.blockSignals(False)
+        self.steps.blockSignals(True)
+        self.steps.clear()
+        sc = self.show_.scenes.get(name)
+        if sc:
+            steps = scene_steps(sc)
+            for i, st in enumerate(steps):
+                n = len(st["values"])
+                self.steps.addItem(f"{i + 1}.  фейд {float(st.get('fade', 0)):.1f} с,  "
+                                   f"пауза {float(st.get('hold', 0)):.1f} с   ({n} приб.)")
+            self.steps.setCurrentRow(min(keep_row or 0, len(steps) - 1))
+            self.loop.blockSignals(True)
+            self.loop.setChecked(bool(sc.get("loop", True)))
+            self.loop.setEnabled(len(steps) > 1)
+            self.loop.blockSignals(False)
+        self.steps.blockSignals(False)
+        self._step_selected(self.steps.currentRow())
 
-    def _fade_changed(self, v):
-        name = self._current_name()
-        if name in self.show_.scenes:
-            self.show_.scenes[name]["fade"] = v
+    # --- шаги -----------------------------------------------------------
+
+    def _scene(self):
+        return self.show_.scenes.get(self.selected)
+
+    def _step_list(self):
+        sc = self._scene()
+        return [dict(s) for s in scene_steps(sc)] if sc else []
+
+    def _save_steps(self, steps, row=None):
+        sc = self._scene()
+        if sc is None or not steps:
+            return
+        set_scene_steps(sc, steps)
+        self._selected(keep_row=row if row is not None else self.steps.currentRow())
+        self._highlight()
+
+    def _step_selected(self, row):
+        steps = self._step_list()
+        ok = 0 <= row < len(steps)
+        for w, key in ((self.fade, "fade"), (self.hold, "hold")):
+            w.blockSignals(True)
+            w.setValue(float(steps[row].get(key, 0)) if ok else 0)
+            w.blockSignals(False)
+        self.hold.setEnabled(len(steps) > 1)
+
+    def _timing_changed(self, *_):
+        row = self.steps.currentRow()
+        steps = self._step_list()
+        if not 0 <= row < len(steps):
+            return
+        steps[row]["fade"] = self.fade.value()
+        steps[row]["hold"] = self.hold.value()
+        self._save_steps(steps, row)
+
+    def _loop_changed(self, on):
+        sc = self._scene()
+        if sc is not None:
+            sc["loop"] = bool(on)
+
+    def _show_step(self):
+        row = self.steps.currentRow()
+        if self.selected and row >= 0:
+            self.engine.stop_chase()
+            self.engine.go_scene(self.selected, sequence=False, step=row)
+            self._highlight()
+
+    def _replace_step(self):
+        row = self.steps.currentRow()
+        steps = self._step_list()
+        if not self.selected or not 0 <= row < len(steps):
+            return
+        st = steps[row]
+        if not self.engine.record_step(self.selected, st.get("fade", 0), st.get("hold", 0), index=row):
+            QMessageBox.warning(self, "Шаг", "Программер пуст — сначала выставьте значения на вкладке «Программер»")
+            return
+        self._selected(keep_row=row)
+
+    def _dup_step(self):
+        row = self.steps.currentRow()
+        steps = self._step_list()
+        if 0 <= row < len(steps):
+            steps.insert(row + 1, copy.deepcopy(steps[row]))
+            self._save_steps(steps, row + 1)
+
+    def _move_step(self, d):
+        row = self.steps.currentRow()
+        steps = self._step_list()
+        new = row + d
+        if 0 <= row < len(steps) and 0 <= new < len(steps):
+            steps[row], steps[new] = steps[new], steps[row]
+            self._save_steps(steps, new)
+
+    def _del_step(self):
+        row = self.steps.currentRow()
+        steps = self._step_list()
+        if not 0 <= row < len(steps):
+            return
+        if len(steps) == 1:
+            QMessageBox.information(self, "Шаг", "Это единственный шаг — удалите сцену целиком.")
+            return
+        del steps[row]
+        self._save_steps(steps, max(0, row - 1))
 
     def _to_programmer(self):
         name = self._current_name()
+        row = max(0, self.steps.currentRow())
         if name:
-            self.engine.load_scene_to_programmer(name)
-            self.hub.changed.emit("patch")  # перестроит программер
-            QMessageBox.information(self, "Программер", f"Сцена «{name}» загружена в программер.")
+            self.engine.load_scene_to_programmer(name, step=row)
+            self.hub.changed.emit("programmer")
+            QMessageBox.information(self, "Программер",
+                                    f"Шаг {row + 1} сцены «{name}» загружен в программер.\n"
+                                    "Измените его и нажмите здесь «Заменить из программера».")
 
     def _rename(self):
         old = self._current_name()

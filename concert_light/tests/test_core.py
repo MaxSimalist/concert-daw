@@ -176,6 +176,67 @@ def test_scene_button_color():
     print("цвет кнопки сцены ok")
 
 
+def test_scene_steps():
+    """Шаги внутри сцены: запись из программера, проигрывание по кругу и один раз."""
+    from core.show import scene_steps
+    show = make_show()
+    eng = Engine(show, FakeOutput())
+    for color in ("red", "green", "blue"):
+        eng.clear_programmer()
+        eng.set_programmer([1], "dimmer", 255)
+        eng.set_programmer([1], color, 255)
+        n = eng.record_step("Мигалка", fade=0, hold=0.5)               # все каналы (как в программе)
+    assert n == 3 and len(scene_steps(show.scenes["Мигалка"])) == 3
+    assert show.scenes["Мигалка"]["values"][1]["red"] == 255     # values = шаг 1
+    eng.clear_programmer()
+
+    t = time.monotonic()
+    eng.go_scene("Мигалка")
+    seq_start = eng.seq["next"] - 0.5
+    def rgb(at):
+        u = eng.compute(at)
+        return u[1], u[2], u[3]
+    assert rgb(seq_start + 0.1) == (255, 0, 0) and eng.scene_progress() == (1, 3)
+    assert rgb(seq_start + 0.6) == (0, 255, 0) and eng.scene_progress() == (2, 3)  # красный шага 1 погас
+    assert rgb(seq_start + 1.1) == (0, 0, 255)
+    assert rgb(seq_start + 1.6) == (255, 0, 0)                       # по кругу
+    assert eng.current_scene == "Мигалка"
+
+    show.scenes["Мигалка"]["loop"] = False                           # один раз
+    eng.go_scene("Мигалка")
+    s0 = eng.seq["next"] - 0.5
+    for dt in (0.6, 1.1, 1.6, 2.1, 3.0):
+        eng.compute(s0 + dt)
+    assert rgb(s0 + 3.0) == (0, 0, 255) and eng.seq is None and eng.scene_progress() == (3, 3)
+
+    # замена шага 2 и сохранение/загрузка
+    eng.set_programmer([1], "strobe", 255)
+    eng.set_programmer([1], "dimmer", 255)
+    assert eng.record_step("Мигалка", fade=1, hold=2, full=False, index=1) == 2
+    st = scene_steps(show.scenes["Мигалка"])[1]
+    assert st["values"][1].get("strobe") == 255 and st["hold"] == 2
+    path = os.path.join(tempfile.mkdtemp(), "s.clshow")
+    show.save(path)
+    s2 = Show.load(path, show.library)
+    st2 = scene_steps(s2.scenes["Мигалка"])
+    assert len(st2) == 3 and st2[1]["values"][1]["strobe"] == 255 and s2.scenes["Мигалка"]["loop"] is False
+
+    # обычная сцена (без паузы) + шаг: шаг 1 получает паузу нового шага
+    show.scenes["Обычная"] = {"fade": 0, "values": {1: {"dimmer": 255}}}
+    eng.set_programmer([1], "dimmer", 10)
+    eng.record_step("Обычная", fade=0, hold=1.5)
+    assert [s["hold"] for s in scene_steps(show.scenes["Обычная"])] == [1.5, 1.5]
+
+    # чейз берёт из сцены только шаг 1, не запуская её шаги
+    show.chases["Ч"] = {"steps": ["Мигалка"], "step_time": 1, "fade": 0}
+    eng.start_chase("Ч")
+    eng.compute()
+    assert eng.seq is None and eng.current_scene == "Мигалка"
+    eng.release(0)
+    assert eng.seq is None and eng.current_scene is None
+    print("шаги сцены ok")
+
+
 def test_effects():
     show = make_show()
     eng = Engine(show, FakeOutput())
@@ -353,6 +414,7 @@ if __name__ == "__main__":
     test_record_full_fixture_state()
     test_manual_patch()
     test_scene_button_color()
+    test_scene_steps()
     test_effects()
     test_timeline()
     test_save_load()

@@ -24,6 +24,36 @@ CUE_ACTIONS = {
 CUE_NEEDS_TARGET = {"scene": "scenes", "chase_start": "chases", "effect_on": "effects", "effect_off": "effects"}
 
 
+MIN_STEP = 0.05     # самый короткий шаг, с
+
+
+def scene_steps(sc):
+    """Шаги сцены: [{"values", "fade", "hold"}]. Сцена без шагов — один шаг."""
+    steps = sc.get("steps")
+    if steps:
+        return steps
+    return [{"values": sc["values"], "fade": float(sc.get("fade", 0.0)), "hold": 0.0}]
+
+
+def set_scene_steps(sc, steps):
+    """Записать шаги; values/fade сцены = первый шаг (для кнопки, таймлайна и старых версий)."""
+    steps = [s for s in steps if s.get("values") is not None]
+    if not steps:
+        return
+    sc["values"] = steps[0]["values"]
+    sc["fade"] = float(steps[0].get("fade", 0.0))
+    if len(steps) > 1:
+        sc["steps"] = steps
+        sc.setdefault("loop", True)
+    else:
+        sc.pop("steps", None)
+
+
+def step_time(step):
+    """Сколько длится шаг: фейд + пауза (не меньше MIN_STEP)."""
+    return max(MIN_STEP, float(step.get("fade", 0.0)) + float(step.get("hold", 0.0)))
+
+
 def scene_rgb(scene):
     """Цвет сцены для кнопки: средний RGB горящих приборов, ярко (None — сцена без цвета)."""
     rs = gs = bs = n = 0
@@ -47,7 +77,9 @@ class Show:
         self.library = library or {}
         self.types = {}      # типы, используемые в шоу (копия внутри файла шоу)
         self.patch = []      # [Fixture]
-        self.scenes = {}     # name -> {"values": {fid: {attr: val}}, "fade": сек}
+        # name -> {"values": {fid: {attr: val}}, "fade": сек,
+        #          "steps": [{"values", "fade", "hold"}] (если шагов больше одного), "loop": bool}
+        self.scenes = {}
         self.chases = {}     # name -> {"steps": [scene], "step_time": сек, "fade": 0..1}
         self.effects = {}    # name -> {"kind", "fixtures": [fid], "speed", "size", "spread"}
         self.songs = {}      # name -> {"audio": path, "cues": [{"t","action","target","fade"}]}
@@ -96,6 +128,8 @@ class Show:
         self.patch = [f for f in self.patch if f.id != fid]
         for sc in self.scenes.values():
             sc["values"].pop(fid, None)
+            for st in sc.get("steps", []):
+                st["values"].pop(fid, None)
         for ef in self.effects.values():
             ef["fixtures"] = [x for x in ef["fixtures"] if x != fid]
 
@@ -127,17 +161,27 @@ class Show:
             "version": 1,
             "types": [self.types[n].to_dict() for n in sorted(used) if n in self.types],
             "patch": [f.to_dict() for f in self.patch],
-            "scenes": {
-                name: {
-                    "fade": sc.get("fade", 0.0),
-                    "values": {str(fid): v for fid, v in sc["values"].items()},
-                }
-                for name, sc in self.scenes.items()
-            },
+            "scenes": {name: self._scene_to_dict(sc) for name, sc in self.scenes.items()},
             "chases": copy.deepcopy(self.chases),
             "effects": copy.deepcopy(self.effects),
             "songs": copy.deepcopy(self.songs),
         }
+
+    @staticmethod
+    def _values_to_dict(values):
+        return {str(fid): v for fid, v in values.items()}
+
+    @staticmethod
+    def _values_from_dict(d):
+        return {int(k): {a: float(x) for a, x in v.items()} for k, v in (d or {}).items()}
+
+    def _scene_to_dict(self, sc):
+        out = {"fade": sc.get("fade", 0.0), "values": self._values_to_dict(sc["values"])}
+        if sc.get("steps"):
+            out["loop"] = bool(sc.get("loop", True))
+            out["steps"] = [{"fade": float(st.get("fade", 0.0)), "hold": float(st.get("hold", 0.0)),
+                             "values": self._values_to_dict(st["values"])} for st in sc["steps"]]
+        return out
 
     def save(self, path=None):
         path = path or self.path
@@ -162,10 +206,13 @@ class Show:
                 continue
             show.patch.append(Fixture(fd["id"], fd["name"], ft, fd["address"]))
         for name, sc in d.get("scenes", {}).items():
-            show.scenes[name] = {
-                "fade": float(sc.get("fade", 0.0)),
-                "values": {int(k): {a: float(x) for a, x in v.items()} for k, v in sc.get("values", {}).items()},
-            }
+            scene = {"fade": float(sc.get("fade", 0.0)), "values": cls._values_from_dict(sc.get("values"))}
+            if sc.get("steps"):
+                scene["loop"] = bool(sc.get("loop", True))
+                set_scene_steps(scene, [{"fade": float(st.get("fade", 0.0)), "hold": float(st.get("hold", 0.0)),
+                                         "values": cls._values_from_dict(st.get("values"))}
+                                        for st in sc["steps"]])
+            show.scenes[name] = scene
         show.chases = d.get("chases", {})
         show.effects = d.get("effects", {})
         show.songs = d.get("songs", {})
