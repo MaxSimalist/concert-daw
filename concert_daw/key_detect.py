@@ -1,18 +1,25 @@
 """
-key_detect.py — Определение тональности песни (алгоритм Крумхансла–Шмуклера).
+key_detect.py — Определение тональности песни.
 
-Как работает
-------------
-1. Берём «музыкальные» дорожки песни (без клика и гайда), сводим в моно
-   и понижаем частоту до ~11 кГц — для тональности этого достаточно.
-2. Спектр по кадрам (FFT 8192) → энергия каждой из 12 нот (C, C#, … B)
-   в диапазоне 60–2000 Гц, суммируем по всей песне = «хрома-профиль».
-3. Сравниваем профиль с эталонными профилями мажора и минора для всех
-   24 тональностей (корреляция). Лучшее совпадение — ответ.
+Как работает (версия 2 — точнее прежнего «чистого» Крумхансла–Шмуклера)
+-------------------------------------------------------------------------
+1. Берём музыкальные дорожки (без клика, гайда и БАРАБАНОВ — у тарелок и бочки нет
+   высоты, они только «шумят» в профиле нот), сводим в моно, понижаем до ~11 кГц.
+2. Спектр по кадрам (FFT 8192, ~0.7 с), в каждом кадре оставляем только ТОНАЛЬНЫЕ пики
+   (локальные максимумы заметно выше «шумового пола» кадра) — шум, дыхание, удары
+   не попадают в ноты. Амплитуды сжимаем (корень), чтобы громкие ноты не забивали остальные.
+3. Строй: если фонограмма сыграна не точно на A=440 (например, на +30 центов), ноты
+   «съезжают» между соседними полутонами. Строй оценивается по самим пикам и
+   учитывается.
+4. Получаются два профиля из 12 нот: общий (70–2000 Гц) и басовый (40–250 Гц, бас
+   чаще всего играет тонику), отдельно — профиль конца песни (песни обычно
+   заканчиваются на тонике).
+5. Профиль сравнивается с эталонами 24 тональностей — сразу с тремя наборами
+   эталонов (Крумхансл–Кесслер, Темперли, Альбрехт–Шанахан), результаты
+   складываются. Бас и концовка добавляют «голос» тонике — это лучше всего различает
+   параллельные мажор/минор (C ↔ Am), главную ошибку простых алгоритмов.
 
-Точность для поп/рок-материала обычно 70–85 %. Частые ошибки — соседние
-тональности по квинте и параллельный мажор/минор (C ↔ Am). Поэтому
-тональность всегда можно поправить вручную (правый клик по песне).
+Тональность всегда можно поправить вручную (правый клик по треку → Тональность).
 """
 from __future__ import annotations
 
@@ -21,7 +28,8 @@ import re
 import numpy as np
 import soundfile as sf
 
-from model import Song, is_click_like
+from model import KEY_ALGO_VERSION, Song, is_click_like  # noqa: F401
+
 
 NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 # Привычные музыкантам названия: мажор — Eb, Ab, Bb; минор — C#m, F#m, G#m
@@ -30,55 +38,176 @@ MINOR_NAMES = ["Cm", "C#m", "Dm", "Ebm", "Em", "Fm", "F#m", "Gm", "G#m", "Am", "
 ALL_KEYS = MAJOR_NAMES + MINOR_NAMES
 _ENHARMONIC = {"Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#", "Cb": "B", "Fb": "E"}
 
-# Эталонные профили Крумхансла–Кесслер (тоника — первый элемент)
-MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+# Эталонные профили (тоника — первый элемент)
+MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])   # Крумхансл–Кесслер
 MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+PROFILES = [
+    (MAJOR, MINOR),
+    (np.array([5.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 4.5, 2.0, 3.5, 1.5, 4.0]),                   # Темперли
+     np.array([5.0, 2.0, 3.5, 4.5, 2.0, 4.0, 2.0, 4.5, 3.5, 2.0, 1.5, 4.0])),
+    (np.array([0.238, 0.006, 0.111, 0.006, 0.137, 0.094, 0.016, 0.214, 0.009, 0.080, 0.008, 0.081]),  # Альбрехт–Шанахан
+     np.array([0.220, 0.006, 0.104, 0.123, 0.019, 0.103, 0.012, 0.214, 0.062, 0.022, 0.061, 0.052])),
+]
+DRUMS = re.compile(r"drum|бочк|барабан|перкус|perc|kick|snare|hat|hh\b|tom\b|overhead|\boh\b|cymbal|тарелк|"
+                   r"рабочий|малый|shaker|шейкер|clap|хлоп", re.IGNORECASE)
 
 TARGET_SR = 11025
 N_FFT = 8192
 MAX_FRAMES = 700  # ограничиваем объём работы: кадры берутся равномерно по всей песне
+BASS_WEIGHT = 0.10
+EDGE_SECONDS = 2.5            # первый/последний аккорд песни
+END_WEIGHT = 0.30             # песня почти всегда заканчивается на тонике…
+START_WEIGHT = 0.12           # …и часто с неё начинается
+END_BASS_WEIGHT = 0.10        # последняя басовая нота
+CLOSE_MARGIN = 0.15           # «почти так же похоже» — второе семейство тоже рассматривается
+MAJ_TRIAD = np.array([1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0], dtype=float)
+MIN_TRIAD = np.array([1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0], dtype=float)
 
 
-def chroma_profile(mono: np.ndarray, sr: float) -> np.ndarray:
-    """12-мерный профиль энергии нот."""
+def _frames(mono: np.ndarray) -> np.ndarray:
     if mono.shape[0] < N_FFT:
         mono = np.pad(mono, (0, N_FFT - mono.shape[0]))
     hop = N_FFT // 2
     n_frames = (mono.shape[0] - N_FFT) // hop + 1
     starts = np.linspace(0, (n_frames - 1) * hop, min(n_frames, MAX_FRAMES)).astype(int)
-    frames = np.stack([mono[s:s + N_FFT] for s in starts]) * np.hanning(N_FFT)
-    spec = np.abs(np.fft.rfft(frames, axis=1))
+    return np.stack([mono[s:s + N_FFT] for s in starts]) * np.hanning(N_FFT).astype(np.float32)
+
+
+def _peaks(spec: np.ndarray) -> np.ndarray:
+    """Оставить только тональные пики: локальный максимум и выше 4× медианы кадра."""
+    left = np.roll(spec, 1, axis=1)
+    right = np.roll(spec, -1, axis=1)
+    floor = np.median(spec, axis=1, keepdims=True)
+    keep = (spec > left) & (spec >= right) & (spec > 4.0 * floor + 1e-12)
+    return np.where(keep, spec, 0.0)
+
+
+def _tuning(freqs: np.ndarray, weights: np.ndarray) -> float:
+    """Отклонение строя от A=440 в долях полутона (−0.5…0.5): круговое среднее по пикам."""
+    ok = (freqs > 80) & (freqs < 2000) & (weights > 0)
+    if not np.any(ok):
+        return 0.0
+    midi = 69 + 12 * np.log2(freqs[ok] / 440.0)
+    ang = 2 * np.pi * (midi - np.round(midi))
+    w = weights[ok]
+    return float(np.angle(np.sum(w * np.exp(1j * ang))) / (2 * np.pi))
+
+
+def _pc_profile(freqs, weights, lo, hi, tuning) -> np.ndarray:
+    sel = (freqs >= lo) & (freqs <= hi) & (weights > 0)
+    if not np.any(sel):
+        return np.zeros(12)
+    midi = 69 + 12 * np.log2(freqs[sel] / 440.0) - tuning
+    dev = np.abs(midi - np.round(midi))
+    w = weights[sel] * np.clip(1.0 - dev / 0.4, 0.0, 1.0)     # далеко от ноты (неточный пик) — не считаем
+    pc = np.mod(np.round(midi).astype(int), 12)
+    return np.bincount(pc, weights=w, minlength=12)
+
+
+def analyze_chroma(mono: np.ndarray, sr: float) -> dict:
+    """Профили нот песни: {"all", "bass", "end"} + {"tuning"} (строй, полутона)."""
+    frames = _frames(mono)
+    spec = np.sqrt(np.abs(np.fft.rfft(frames, axis=1)))          # сжатие амплитуд
+    spec = spec / (spec.sum(axis=1, keepdims=True) + 1e-9)        # громкий припев не перевешивает
+    pk = _peaks(spec)
     freqs = np.fft.rfftfreq(N_FFT, 1.0 / sr)
-    band = (freqs >= 60) & (freqs <= 2000)
-    energy = spec[:, band]
-    # каждый кадр нормируем, чтобы громкий припев не перевешивал всю песню
-    energy = energy / (energy.sum(axis=1, keepdims=True) + 1e-9)
-    midi = 69 + 12 * np.log2(freqs[band] / 440.0)
-    pitch_class = np.mod(np.round(midi).astype(int), 12)
-    return np.bincount(pitch_class, weights=energy.sum(axis=0), minlength=12)
+    total = pk.sum(axis=0)
+    tuning = _tuning(freqs, total)
+    # начало и самый конец МУЗЫКИ (тишину по краям не считаем): первый и последний аккорды
+    loud = np.flatnonzero(np.abs(frames).max(axis=1) > 0.05 * (np.abs(frames).max() + 1e-9))
+    first, last = (loud[0], loud[-1]) if loud.size else (0, pk.shape[0] - 1)
+    span = max(1, int(round(EDGE_SECONDS * sr / (N_FFT // 2))))
+    head = pk[first:first + span].sum(axis=0)
+    tail = pk[max(first, last - span + 1):last + 1].sum(axis=0)
+    return {"all": _pc_profile(freqs, total, 70, 2000, tuning),
+            "bass": _pc_profile(freqs, total, 40, 250, tuning),
+            "end": _pc_profile(freqs, tail, 40, 1000, tuning),
+            "end_bass": _pc_profile(freqs, tail, 40, 200, tuning),
+            "start": _pc_profile(freqs, head, 40, 1000, tuning),
+            "tuning": tuning}
 
 
-def key_from_chroma(chroma: np.ndarray) -> tuple[str, float]:
-    """(тональность, уверенность 0..1)."""
-    if not np.any(chroma):
-        return "?", 0.0
-    scores = []
+def chroma_profile(mono: np.ndarray, sr: float) -> np.ndarray:
+    """12-мерный профиль энергии нот (совместимость)."""
+    return analyze_chroma(mono, sr)["all"]
+
+
+def _norm(v: np.ndarray) -> np.ndarray:
+    s = v.sum()
+    return v / s if s > 0 else v
+
+
+def key_scores(prof: dict) -> list[tuple[float, str]]:
+    """Оценка всех 24 тональностей (больше — лучше)."""
+    chroma = prof["all"]
+    bass = _norm(prof.get("bass", np.zeros(12)))
+    end, start = prof.get("end"), prof.get("start")
+    end_bass = _norm(prof.get("end_bass", np.zeros(12)))
+
+    def triad_fit(seg, tonic, mode):
+        """Насколько отрезок звучит как тоническое трезвучие (корреляция, −1…1)."""
+        if seg is None or not np.any(seg):
+            return 0.0
+        return float(np.corrcoef(seg, np.roll(MIN_TRIAD if mode else MAJ_TRIAD, tonic))[0, 1])
+    # 1) «звукоряд»: профили нот + бас — надёжно находят семейство тональности
+    base = {}
     for tonic in range(12):
-        for profile, suffix in ((MAJOR, ""), (MINOR, "m")):
-            r = np.corrcoef(chroma, np.roll(profile, tonic))[0, 1]
-            scores.append((r, (MINOR_NAMES if suffix else MAJOR_NAMES)[tonic]))
-    scores.sort(reverse=True)
+        for mode in (0, 1):
+            r = 0.0
+            for maj, mnr in PROFILES:
+                r += np.corrcoef(chroma, np.roll(mnr if mode else maj, tonic))[0, 1]
+            base[(tonic, mode)] = r / len(PROFILES) + BASS_WEIGHT * (bass[tonic] - 1 / 12) * 4
+
+    # 2) мажор или параллельный минор (C ↔ Am — одни и те же ноты): решают первый и
+    #    последний аккорды и последняя басовая нота. Только между этими двумя —
+    #    поэтому концовка на «чужом» аккорде не может увести в другую тональность.
+    def cues(tonic, mode):
+        return (END_WEIGHT * triad_fit(end, tonic, mode)
+                + END_BASS_WEIGHT * (end_bass[tonic] - 1 / 12) * 4
+                + START_WEIGHT * triad_fit(start, tonic, mode))
+    def relative(k):
+        return ((k[0] + 9) % 12, 1) if k[1] == 0 else ((k[0] + 3) % 12, 0)
+    ranked = sorted(base, key=base.get, reverse=True)
+    top = ranked[0]
+    cands = {top, relative(top)}
+    # близкий второй вариант (например, вамп «Am–G–F–G» похож на G-мажор) — тоже в споре
+    for k in ranked[1:3]:
+        if base[top] - base[k] < CLOSE_MARGIN and k not in cands:
+            cands |= {k, relative(k)}
+    scored = {k: base[k] + cues(*k) for k in cands}
+    winner = max(scored, key=scored.get)
+    final = dict(base)
+    final[winner] = max(base[top], scored[winner]) + 1e-6   # победитель — первый в списке
+    out = [(float(v), (MINOR_NAMES if m else MAJOR_NAMES)[t]) for (t, m), v in final.items()]
+    out.sort(reverse=True)
+    return out
+
+
+def key_from_chroma(chroma, extra: dict | None = None) -> tuple[str, float]:
+    """(тональность, уверенность 0..1). chroma — 12 чисел или словарь из analyze_chroma()."""
+    prof = chroma if isinstance(chroma, dict) else {"all": np.asarray(chroma, dtype=float)}
+    if extra:
+        prof = {**prof, **extra}
+    if not np.any(prof["all"]):
+        return "?", 0.0
+    scores = key_scores(prof)
     best, second = scores[0], scores[1]
     confidence = max(0.0, min(1.0, (best[0] - second[0]) * 5 + best[0] * 0.5))
     return best[1], confidence
 
 
+def music_tracks(song: Song) -> list:
+    """Дорожки для тональности: без клика/гайда и без барабанов (если есть что-то кроме них)."""
+    tracks = [t for t in song.tracks if not is_click_like(t.name)] or list(song.tracks)
+    tonal = [t for t in tracks if not DRUMS.search(t.name or "")]
+    return tonal or tracks
+
+
 def detect_song_key(song: Song) -> tuple[str, float]:
     """Тональность исходника песни (без учёта транспонирования в редакторе)."""
-    tracks = [t for t in song.tracks if not is_click_like(t.name)] or list(song.tracks)
     mix = None
     sr_out = TARGET_SR
-    for t in tracks:
+    for t in music_tracks(song):
         try:
             data, sr = sf.read(t.file, dtype="float32", always_2d=True)
         except Exception:
@@ -86,7 +215,7 @@ def detect_song_key(song: Song) -> tuple[str, float]:
         mono = data.mean(axis=1)
         factor = max(1, int(round(sr / TARGET_SR)))
         n = mono.shape[0] // factor * factor
-        mono = mono[:n].reshape(-1, factor).mean(axis=1)   # простое понижение частоты
+        mono = mono[:n].reshape(-1, factor).mean(axis=1)   # понижение частоты (усреднение = фильтр)
         sr_out = sr / factor
         if mix is None:
             mix = mono
@@ -96,7 +225,7 @@ def detect_song_key(song: Song) -> tuple[str, float]:
             mix[:mono.shape[0]] += mono
     if mix is None:
         return "?", 0.0
-    return key_from_chroma(chroma_profile(mix, sr_out))
+    return key_from_chroma(analyze_chroma(mix, sr_out))
 
 
 def transpose_key(key: str, semitones: float) -> str:

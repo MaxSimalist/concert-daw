@@ -75,6 +75,8 @@ def _from_dict(cls, d: dict):
 # ──────────────────────────────────────────────────────────────────────────────
 # Дорожка / правка песни / песня / плейлист
 # ──────────────────────────────────────────────────────────────────────────────
+KEY_ALGO_VERSION = 2   # версия алгоритма тональности (key_detect.py); выросла — пересчёт
+
 @dataclass
 class PluginState:
     """Инсерт-плагин дорожки: путь к VST3 + сохранённое состояние (base64)."""
@@ -163,6 +165,7 @@ class Song:
     duration: float = 0.0     # длина исходника в секундах (самая длинная дорожка)
     key: str = ""             # тональность исходника: "Am", "F#"; "" — ещё не определена, "?" — не удалось
     key_manual: bool = False  # указана вручную — не перезаписывать автоопределением
+    key_ver: int = 0          # какой версией алгоритма найдена тональность (старая — пересчитать)
     end_action: str = "default"  # в конце песни: default (как в настройках) | stop | next
     end_gap: float = 0.0      # для "next": пауза перед следующей песней, сек
     bpm: float = 0.0          # темп исходника (автоопределение); 0 — ещё не определён, -1 — не удалось
@@ -177,6 +180,16 @@ class Song:
     silence_trail: float = -1.0  # тишина в конце исходника, сек
     silence_ignore: bool = False  # «не предлагать обрезать тишину» для этого трека
 
+    @property
+    def key_outdated(self) -> bool:
+        """Тональность найдена старой (менее точной) версией алгоритма — пересчитать в фоне."""
+        return bool(self.key) and not self.key_manual and self.key_ver < KEY_ALGO_VERSION
+
+    @property
+    def missing_files(self) -> list:
+        """Дорожки, файлов которых больше нет на диске (удалены/переименованы/диск отключён)."""
+        return [t for t in self.tracks if not os.path.exists(t.file)]
+
     @classmethod
     def from_dict(cls, d: dict) -> "Song":
         return cls(name=d["name"], folder=d.get("folder", ""),
@@ -186,6 +199,7 @@ class Song:
                    duration=float(d.get("duration", 0.0)),
                    key=str(d.get("key", "")),
                    key_manual=bool(d.get("key_manual", False)),
+                   key_ver=int(d.get("key_ver", 0)),
                    end_action=str(d.get("end_action", "default")),
                    end_gap=float(d.get("end_gap", 0.0)),
                    bpm=float(d.get("bpm", 0.0)),

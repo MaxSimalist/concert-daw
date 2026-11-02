@@ -29,7 +29,7 @@ import audio_edit
 from key_detect import ALL_KEYS, analyze_song, key_label, tempo_label
 from loudness import normalization_gain_db
 from midi_ctl import ACTIONS, MidiController
-from model import is_click_like
+from model import KEY_ALGO_VERSION, is_click_like
 from recorder import Recorder, attach_to_song, free_space_gb, load_session, parse_channels
 import dsp
 from sync_server import SyncServer
@@ -153,7 +153,8 @@ class _KeyTask(QRunnable):
         self.song, self.signals = song, signals
 
     def run(self) -> None:
-        need_key, need_bpm, need_lufs = not self.song.key, self.song.bpm == 0, self.song.lufs == 0
+        need_key = not self.song.key or self.song.key_outdated
+        need_bpm, need_lufs = self.song.bpm == 0, self.song.lufs == 0
         need_silence = self.song.silence_lead < 0
         try:
             # анализ в процессе-работнике: не отнимает GIL у звука и интерфейса
@@ -1016,15 +1017,31 @@ class MainWindow(QMainWindow):
             mark = "✎" if not song.edit.is_identity else ""
             end = {"next": "→", "stop": "■"}.get(song.end_action, "")
             right += [x for x in (mark, end) if x]
+            missing = song.missing_files
+            gone = bool(song.tracks) and len(missing) == len(song.tracks)
+            if gone:
+                right = ["⚠ файл удалён"]
+            elif missing:
+                right.insert(0, f"⚠ нет {len(missing)} из {len(song.tracks)}")
             item.setText(f"{prefix}{i + 1}. {song.name}")
             item.setData(ROLE_RIGHT, "  ".join(right))
             tip = [song.name]
+            if missing:
+                tip.append("Нет на диске (удалены, переименованы или диск отключён):")
+                tip += [f"  • {t.file}" for t in missing[:8]] + (["  …"] if len(missing) > 8 else [])
+                tip.append("Правый клик → «Найти файлы…» или «Убрать из плейлиста»")
             if song.edit.summary():
                 tip.append(song.edit.summary())
             tip.append(song.folder)
             item.setToolTip("\n".join(tip))
-            item.setFont(bold if sid == self.cued_id else self.song_list.font())
+            font = QFont(bold if sid == self.cued_id else self.song_list.font())
+            font.setStrikeOut(gone)
+            item.setFont(font)
             color = ACCENT if sid == self.cued_id else (ORANGE if sid == nxt_id else TEXT)
+            if gone:
+                color = "#ef4b55"
+            elif missing:
+                color = "#f7c948"
             item.setForeground(QBrush(QColor(color)))
 
     def _songs_from(self, paths: list) -> list[Song]:
@@ -1144,6 +1161,15 @@ class MainWindow(QMainWindow):
         a_trim.setEnabled(bool(lead or trail) or song.silence_lead < 0)
         a_trim_all = m.addAction(icon("scissors"), "Обрезать тишину во всех треках плейлиста…")
         a_folder = m.addAction("Открыть папку")
+        a_relink = a_drop = None
+        if song.missing_files:
+            m.addSeparator()
+            a_relink = m.addAction(icon("search"), "Найти файлы… (указать папку, куда их перенесли)")
+            if len(song.missing_files) < len(song.tracks):
+                a_drop = m.addAction("Убрать из трека дорожки без файлов")
+        a_missing_all = m.addAction("Убрать из плейлиста все треки без файлов") \
+            if any(s.tracks and len(s.missing_files) == len(s.tracks)
+                   for s in (self._locate(song.id)[0].songs if self._locate(song.id) else [])) else None
         m.addSeparator()
         a_remove = m.addAction("Убрать из плейлиста")
         chosen = m.exec(self.song_list.mapToGlobal(pos))
@@ -1186,9 +1212,81 @@ class MainWindow(QMainWindow):
             self._trim_playlist(self._locate(song.id)[0])
         elif chosen is a_folder and song.folder:
             QDesktopServices.openUrl(QUrl.fromLocalFile(song.folder))
+        elif a_relink is not None and chosen is a_relink:
+            self._relink_song(song)
+        elif a_drop is not None and chosen is a_drop:
+            if self.engine.is_playing and song.id == self.cued_id:
+                self._status("Остановите воспроизведение, чтобы менять дорожки трека", warn=True)
+            else:
+                gone = {t.file for t in song.missing_files}
+                song.tracks = [t for t in song.tracks if t.file not in gone]
+                self._song_files_changed(song)
+        elif a_missing_all is not None and chosen is a_missing_all:
+            self._remove_missing_songs(self._locate(song.id)[0])
         elif chosen is a_remove:
             self.song_list.setCurrentItem(item)
             self._remove_song()
+
+    # ── треки, файлы которых удалили ───────────────────────────────────────
+    def _song_files_changed(self, song: Song) -> None:
+        self.cache.pop(song.id, None)
+        if song.id == self.cued_id and not self.engine.is_playing:
+            self._reload_cued()
+        self._missing_sig = None
+        self._refresh_song_items()
+        self._schedule_save()
+
+    def _relink_song(self, song: Song) -> None:
+        """Файлы перенесли в другую папку — ищем их там по имени (и во вложенных папках)."""
+        start = song.folder if song.folder and os.path.isdir(song.folder) else str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, f"Где теперь файлы «{song.name}»?", start)
+        if not folder:
+            return
+        index: dict[str, str] = {}
+        for p in Path(folder).rglob("*"):
+            if p.is_file():
+                index.setdefault(p.name.lower(), str(p))
+        found = 0
+        for t in song.missing_files:
+            new = index.get(Path(t.file).name.lower())
+            if new:
+                t.file, found = new, found + 1
+        if found:
+            song.folder = folder if found == len(song.tracks) else song.folder
+            self._song_files_changed(song)
+        left = len(song.missing_files)
+        self._status(f"«{song.name}»: найдено файлов {found}" + (f", не найдено {left}" if left else ""),
+                     warn=bool(left))
+
+    def _remove_missing_songs(self, pl: Playlist) -> None:
+        gone = [s for s in pl.songs if s.tracks and len(s.missing_files) == len(s.tracks)]
+        if not gone or QMessageBox.question(
+                self, "Треки без файлов", f"Убрать из плейлиста «{pl.name}» треков без файлов: {len(gone)}?\n\n"
+                + "\n".join(s.name for s in gone[:15])) != QMessageBox.StandardButton.Yes:
+            return
+        for s in gone:
+            if s.id == self.cued_id and self.engine.is_playing:
+                continue
+            pl.songs.remove(s)
+            self._forget_song(s.id)
+        self._reload_playlists()
+        self._schedule_save()
+
+    def _check_missing(self) -> None:
+        """Раз в пару секунд (на стопе): не пропали ли файлы треков на диске."""
+        pl = self.shown_playlist
+        if pl is None:
+            return
+        sig = tuple((s.id, len(s.missing_files)) for s in pl.songs)
+        if sig != getattr(self, "_missing_sig", None):
+            first = getattr(self, "_missing_sig", None) is None
+            self._missing_sig = sig
+            self._refresh_song_items()
+            if not first:
+                gone = [s.name for s in pl.songs if s.tracks and len(s.missing_files) == len(s.tracks)]
+                if gone:
+                    self._status(f"Файлы удалены с диска: {', '.join(gone[:3])}"
+                                 + ("…" if len(gone) > 3 else ""), warn=True)
 
     def _after_song_meta_change(self, song: Song) -> None:
         self._refresh_song_items()
@@ -1375,6 +1473,11 @@ class MainWindow(QMainWindow):
         """Сделать песню текущей и встать на её начало.
         Если сейчас играет другая песня — она плавно гасится, и (по настройке)
         выбранная сразу начинает играть. STOP нажимать не нужно."""
+        if song.tracks and len(song.missing_files) == len(song.tracks):
+            self._status(f"«{song.name}»: файлы удалены с диска — правый клик по треку → «Найти файлы…»",
+                         warn=True)
+            self._refresh_song_items()
+            return
         if self.engine.is_playing:
             if self.engine.song is not None and self.engine.song.song.id == song.id:
                 return
@@ -1828,6 +1931,8 @@ class MainWindow(QMainWindow):
             self.fx_tempo.scale_changed = False
             self.cfg.fx_time_scale = self.fx_tempo.scale
             self._schedule_save()
+        if self._tick_count % 60 == 30 and not eng.is_playing:
+            self._check_missing()
         if self._tick_count % 5 == 0:
             self._update_section()
         if self.timeline.isVisible() and song is not None:
@@ -1918,8 +2023,10 @@ class MainWindow(QMainWindow):
             return
 
         def pending(song: Song) -> bool:
-            return bool(song.tracks) and (not song.key or song.bpm == 0 or song.lufs == 0
-                                          or song.silence_lead < 0)
+            if not song.tracks or len(song.missing_files) == len(song.tracks):
+                return False                      # файлов нет — анализировать нечего
+            return (not song.key or song.key_outdated or song.bpm == 0 or song.lufs == 0
+                    or song.silence_lead < 0)
         # сначала выбранный трек, затем следующий, затем все остальные
         order = [self._song_by_id(self.cued_id), self._neighbor(+1)]
         order += [s for pl in self.cfg.playlists for s in pl.songs]
@@ -1935,8 +2042,9 @@ class MainWindow(QMainWindow):
         song = self._song_by_id(song_id)
         if song is None:
             return
-        if not song.key_manual:
+        if not song.key_manual and (not song.key or song.key_outdated):
             song.key = key
+            song.key_ver = KEY_ALGO_VERSION
         if song.bpm == 0:
             song.bpm, song.beat_offset = bpm, offset
         if song.lufs == 0:
