@@ -1,13 +1,15 @@
-"""Вкладка «Сцены»: кнопки-пресеты. Щелчок по сцене = GO."""
+"""Вкладка «Сцены»: кнопки-пресеты. Щелчок — включить (кнопка загорается), ещё раз — выключить."""
 
 import copy
 
-from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QListView,
-    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
+    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
+
+from core.show import scene_rgb
 
 
 def rename_refs(show, kind, old, new):
@@ -27,29 +29,69 @@ def rename_refs(show, kind, old, new):
         song["cues"] = cues
 
 
+def scene_color(scene):
+    rgb = scene_rgb(scene)
+    return QColor(*rgb) if rgb else None
+
+
+class SceneButton(QPushButton):
+    """Кнопка сцены: включена — горит (цветом сцены), выключена — тёмная."""
+
+    def __init__(self, name, color):
+        super().__init__(name)
+        self.name = name
+        self.color = color
+        self.on = None
+        self.selected = False
+        self.setMinimumSize(140, 64)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.set_state(False, False)
+
+    def set_state(self, on, selected):
+        if (on, selected) == (self.on, self.selected):
+            return
+        self.on, self.selected = on, selected
+        border = "3px solid #ffffff" if selected else "3px solid transparent"
+        if on:
+            c = self.color or QColor(255, 170, 0)
+            fg = "#000000" if c.lightness() > 110 else "#ffffff"
+            css = (f"background:{c.name()}; color:{fg}; border:{border}; border-radius:8px;"
+                   "font: bold 12pt; padding:4px;")
+        else:
+            bar = (self.color or QColor(110, 110, 120)).name()
+            css = (f"background:#33333c; color:#b8b8c0; border:{border}; border-bottom:6px solid {bar};"
+                   "border-radius:8px; font: bold 12pt; padding:4px;")
+        self.setStyleSheet(f"QPushButton{{{css}}}")
+
+
 class ScenesTab(QWidget):
+    MIN_W = 150
+
     def __init__(self, show, engine, hub):
         super().__init__()
         self.show_, self.engine, self.hub = show, engine, hub
+        self.buttons = []
+        self.selected = None
         lay = QHBoxLayout(self)
 
-        self.list = QListWidget()
-        self.list.setViewMode(QListView.IconMode)
-        self.list.setGridSize(QSize(150, 74))
-        self.list.setMovement(QListView.Static)
-        self.list.setResizeMode(QListView.Adjust)
-        self.list.setWordWrap(True)
-        self.list.setSpacing(4)
-        f = QFont()
-        f.setPointSize(11)
-        f.setBold(True)
-        self.list.setFont(f)
-        self.list.itemClicked.connect(self._go)
-        lay.addWidget(self.list, 1)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.grid_host = QWidget()
+        self.grid = QGridLayout(self.grid_host)
+        self.grid.setSpacing(8)
+        self.grid.setAlignment(Qt.AlignTop)
+        self.scroll.setWidget(self.grid_host)
+        self.empty = QLabel("Сцен пока нет. Запишите сцену на вкладке «Программер».")
+        self.empty.setAlignment(Qt.AlignCenter)
+        left = QVBoxLayout()
+        left.addWidget(self.scroll, 1)
+        left.addWidget(self.empty)
+        lay.addLayout(left, 1)
 
         side = QVBoxLayout()
-        box = QGroupBox("Выбранная сцена")
-        form = QFormLayout(box)
+        self.box = QGroupBox("Выбранная сцена")
+        form = QFormLayout(self.box)
         self.fade = QDoubleSpinBox()
         self.fade.setRange(0, 60)
         self.fade.setSuffix(" с")
@@ -60,7 +102,7 @@ class ScenesTab(QWidget):
             b = QPushButton(text)
             b.clicked.connect(slot)
             form.addRow(b)
-        side.addWidget(box)
+        side.addWidget(self.box)
 
         rel = QGroupBox("Сброс")
         rf = QFormLayout(rel)
@@ -73,44 +115,62 @@ class ScenesTab(QWidget):
         b.clicked.connect(self._release)
         rf.addRow(b)
         side.addWidget(rel)
-        side.addWidget(QLabel("Щелчок по сцене — включить,\nещё раз — выключить.\n"
+        side.addWidget(QLabel("Щелчок по сцене — включить (кнопка\nзагорается), ещё раз — выключить.\n"
+                              "Белая рамка — сцена, выбранная\nдля правки (настройки выше).\n"
                               "Правка сцены: «В программер» →\nизменить → записать под тем же именем."))
         side.addStretch()
         lay.addLayout(side)
 
-        self.list.currentItemChanged.connect(self._selected)
         hub.changed.connect(lambda k: k in ("scenes", "all") and self.refresh())
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._highlight)
-        self.timer.start(250)
+        self.timer.start(100)
         self.refresh()
 
+    # --- кнопки ---------------------------------------------------------
+
     def refresh(self):
-        cur = self._current_name()
-        self.list.clear()
-        for name in self.show_.scenes:
-            it = QListWidgetItem(name)
-            it.setData(Qt.UserRole, name)
-            it.setTextAlignment(Qt.AlignCenter)
-            it.setSizeHint(QSize(144, 68))
-            self.list.addItem(it)
-            if name == cur:
-                self.list.setCurrentItem(it)
+        if self.selected not in self.show_.scenes:
+            self.selected = next(iter(self.show_.scenes), None)
+        for btn in self.buttons:
+            btn.deleteLater()
+        self.buttons = []
+        for name, sc in self.show_.scenes.items():
+            btn = SceneButton(name, scene_color(sc))
+            btn.clicked.connect(lambda _=False, n=name: self._go(n))
+            self.buttons.append(btn)
+        self._layout_buttons()
+        self.empty.setVisible(not self.buttons)
+        self._selected()
+        self._highlight()
+
+    def _layout_buttons(self):
+        cols = max(1, self.scroll.viewport().width() // self.MIN_W)
+        for i, btn in enumerate(self.buttons):
+            self.grid.addWidget(btn, i // cols, i % cols)
+        self._cols = cols
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        cols = max(1, self.scroll.viewport().width() // self.MIN_W)
+        if cols != getattr(self, "_cols", None) and self.buttons:
+            for btn in self.buttons:
+                self.grid.removeWidget(btn)
+            self._layout_buttons()
 
     def _current_name(self):
-        it = self.list.currentItem()
-        return it.data(Qt.UserRole) if it else None
+        return self.selected
 
     def _highlight(self):
         active = self.engine.current_scene
-        for i in range(self.list.count()):
-            it = self.list.item(i)
-            on = it.data(Qt.UserRole) == active
-            it.setBackground(QColor(200, 120, 0) if on else QColor(55, 55, 65))
-            it.setForeground(QColor(0, 0, 0) if on else QColor(230, 230, 230))
+        for btn in self.buttons:
+            btn.set_state(btn.name == active, btn.name == self.selected)
 
-    def _go(self, item):
-        name = item.data(Qt.UserRole)
+    def _go(self, name):
+        if name not in self.show_.scenes:
+            return
+        self.selected = name
+        self._selected()
         fade = float(self.show_.scenes[name].get("fade", 0))
         self.engine.stop_chase()
         if self.engine.current_scene == name:          # повторное нажатие — выключить сцену
@@ -119,10 +179,13 @@ class ScenesTab(QWidget):
         else:
             self.engine.go_scene(name)
             self.hub.action.emit("scene", name, fade)
+        self._highlight()                               # кнопка меняет цвет сразу, без задержки
         self.hub.changed.emit("programmer")             # сцена могла убрать значения из программера
 
-    def _selected(self, *_):
-        name = self._current_name()
+    def _selected(self):
+        name = self.selected
+        self.box.setTitle(f"Сцена «{name}»" if name else "Выбранная сцена")
+        self.box.setEnabled(bool(name))
         self.fade.blockSignals(True)
         self.fade.setValue(self.show_.scenes[name].get("fade", 0) if name in self.show_.scenes else 0)
         self.fade.blockSignals(False)
@@ -151,6 +214,7 @@ class ScenesTab(QWidget):
             QMessageBox.warning(self, "Ошибка", "Такое имя уже есть")
             return
         self.show_.scenes = {(new if k == old else k): v for k, v in self.show_.scenes.items()}
+        self.selected = new
         rename_refs(self.show_, "scenes", old, new)
         if self.engine.current_scene == old:
             self.engine.current_scene = new

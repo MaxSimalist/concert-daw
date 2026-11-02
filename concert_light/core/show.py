@@ -24,6 +24,24 @@ CUE_ACTIONS = {
 CUE_NEEDS_TARGET = {"scene": "scenes", "chase_start": "chases", "effect_on": "effects", "effect_off": "effects"}
 
 
+def scene_rgb(scene):
+    """Цвет сцены для кнопки: средний RGB горящих приборов, ярко (None — сцена без цвета)."""
+    rs = gs = bs = n = 0
+    for attrs in scene["values"].values():
+        if attrs.get("dimmer", 255) <= 0 or not any(c in attrs for c in ("red", "green", "blue", "white")):
+            continue
+        w = attrs.get("white", 0)
+        rs += min(255, attrs.get("red", 0) + w)
+        gs += min(255, attrs.get("green", 0) + w)
+        bs += min(255, attrs.get("blue", 0) + w)
+        n += 1
+    if not n or rs + gs + bs < 30 * n:
+        return None
+    r, g, b = rs / n, gs / n, bs / n
+    k = 255 / max(r, g, b)
+    return round(r * k), round(g * k), round(b * k)
+
+
 class Show:
     def __init__(self, library=None):
         self.library = library or {}

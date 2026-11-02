@@ -166,6 +166,16 @@ def test_manual_patch():
     print("ручной патч ok")
 
 
+def test_scene_button_color():
+    from core.show import scene_rgb
+    assert scene_rgb({"values": {1: {"dimmer": 255, "red": 255, "green": 0, "blue": 0}}}) == (255, 0, 0)
+    r, g, b = scene_rgb({"values": {1: {"dimmer": 200, "red": 100, "green": 50, "blue": 0}}})
+    assert r == 255 and 126 <= g <= 128 and b == 0                             # тусклый оранжевый -> яркий
+    assert scene_rgb({"values": {1: {"dimmer": 0, "red": 255}}}) is None      # тёмная — без цвета
+    assert scene_rgb({"values": {3: {"pan": 10, "dimmer": 255}}}) is None     # голова без RGB
+    print("цвет кнопки сцены ok")
+
+
 def test_effects():
     show = make_show()
     eng = Engine(show, FakeOutput())
@@ -342,6 +352,7 @@ if __name__ == "__main__":
     test_scene_beats_leftover_programmer()
     test_record_full_fixture_state()
     test_manual_patch()
+    test_scene_button_color()
     test_effects()
     test_timeline()
     test_save_load()
