@@ -58,6 +58,61 @@ X32_DRIVER_PATTERNS = ("x-usb", "xusb", "x-live", "xlive", "x32", "behringer")
 FADER_MIN_DB = -60.0      # низ фейдера = -∞
 STOP_FADE_SECONDS = 0.03  # мягкий STOP без щелчка в порталах
 CENTER_GAIN = np.float32(0.7071)  # моно-дорожка в стерео: по центру, -3 dB на канал
+LIMIT_CEIL = 0.966        # −0.3 dBFS: выше этого на пульт ничего не уходит
+LIMIT_RELEASE = 0.25      # сек: как быстро ограничитель отпускает громкость
+SOFT_KNEE = 0.89          # −1 dBFS: отсюда мягкое «закругление» вместо жёсткого среза
+
+
+class SafetyLimiter:
+    """Защита от перегруза БЕЗ треска.
+
+    Раньше всё громче 0 dBFS просто срезалось (np.clip) — жёсткий срез вершин волны
+    слышен как хрип/треск. Теперь:
+    1) ограничитель «ведёт» громкость: если в блоке пик выше потолка, громкость плавно
+       (за ~1 мс) уходит вниз ровно настолько, насколько нужно, и плавно (0.25 с) возвращается;
+    2) то, что всё же проскочило (самое начало удара), не срезается, а мягко закругляется.
+    Пока сигнал ниже −1 dBFS, ограничитель ничего не делает (звук бит-в-бит как в файле)."""
+
+    def __init__(self) -> None:
+        self.gain = 1.0
+        self.active = False            # для индикации: ограничитель сейчас работает
+
+    def process(self, buf: np.ndarray, peak: float, sr: float) -> None:
+        """buf (frames, ch) — на месте. peak — максимум |buf| (уже посчитан для индикаторов)."""
+        frames = buf.shape[0]
+        need = LIMIT_CEIL / peak if peak > LIMIT_CEIL else 1.0
+        g0 = self.gain
+        if need < g0:
+            g1 = need                                     # вниз — быстро
+        else:
+            k = min(1.0, frames / (LIMIT_RELEASE * sr))
+            g1 = g0 + (min(1.0, need) - g0) * k           # вверх — плавно
+        self.active = g1 < 0.999 or g0 < 0.999
+        if self.active:
+            if abs(g1 - g0) > 1e-6:
+                attack = max(1, min(frames, int(sr * 0.001)))
+                ramp = np.full(frames, g1, dtype=np.float32)
+                if need < g0:
+                    ramp[:attack] = np.linspace(g0, g1, attack, dtype=np.float32)
+                else:
+                    ramp[:] = np.linspace(g0, g1, frames, dtype=np.float32)
+                buf *= ramp[:, None]
+            else:
+                buf *= np.float32(g1)
+        self.gain = g1
+        if peak * max(g0, g1) > SOFT_KNEE:
+            soft_clip(buf)
+
+
+def soft_clip(x: np.ndarray) -> None:
+    """Мягкое закругление выше SOFT_KNEE (на месте). Ниже — без изменений; предел ±1.0."""
+    a = np.abs(x)
+    over = a > SOFT_KNEE
+    if not over.any():
+        return
+    room = 1.0 - SOFT_KNEE
+    a_over = a[over]
+    x[over] = np.sign(x[over]) * (SOFT_KNEE + room * np.tanh((a_over - SOFT_KNEE) / room))
 
 
 def db_to_gain(db: float) -> float:
@@ -207,6 +262,7 @@ class TrackRuntime:
         self.target_gain = db_to_gain(cfg.gain_db)
         self.norm_gain = 1.0                   # поправка нормализации LUFS (клик/гайд — всегда 1.0)
         self.current_gain = self.target_gain   # для плавного изменения (без «молнии» фейдера)
+        self.limiter = SafetyLimiter()         # защита от перегруза этой дорожки
         self.slot = slot
         self.fx: Optional[TrackFX] = None      # встроенные EQ + многополосный компрессор
         self.peak = 0.0                        # общий пик (совместимость)
@@ -309,6 +365,7 @@ class AudioEngine:
         self.metro_gain = 0.5
         self.metro_accent = True
         self._metro_free = 0        # счётчик сэмплов для свободного хода
+        self._bus_limiter = SafetyLimiter()   # защита выходов от суммарного перегруза
         self.metro_beats = 4        # долей в такте: акцент и длина отсчёта
         # Отсчёт перед стартом: сколько сэмплов щелчков осталось до начала трека
         self._countin_left = 0
@@ -678,8 +735,13 @@ class AudioEngine:
                 np.multiply(buf, np.float32(g0), out=buf)
 
             # 4) Пики для индикаторов, по каждому каналу (GUI забирает и обнуляет 30 раз в секунду)
+            #    — ДО ограничителя: лампа перегруза честно показывает, что дорожку перегнали
             ch_pk = np.abs(buf).max(axis=0)
             np.maximum(t.peaks, ch_pk, out=t.peaks)
+            # 4а) защита от перегруза дорожки (фейдер выше 0, EQ, нормализация, смена тона)
+            pk = float(ch_pk.max()) if ch_pk.size else 0.0
+            if pk > LIMIT_CEIL or t.limiter.gain < 0.999:
+                t.limiter.process(buf, pk, sr)
 
             # 5) РОУТИНГ
             if stereo:
@@ -699,12 +761,16 @@ class AudioEngine:
                 if 0 <= oc < n_out:
                     outdata[:, oc] += buf[:, c]
 
-        # Защита порталов: ничего громче 0 dBFS на пульт не уходит
         if self.metro_on:                       # метроном, привязанный к долям песни
             self._metro_render(outdata, pos, self.metro_offset, frames)
             self._metro_free = 0
 
-        np.clip(outdata, -1.0, 1.0, out=outdata)
+        # Выходы пульта: несколько дорожек на одном выходе (или сведение в стерео без пульта)
+        # в сумме могут перегрузить — общий ограничитель вместо жёсткого среза.
+        bus_pk = float(np.abs(outdata).max()) if outdata.size else 0.0
+        if bus_pk > LIMIT_CEIL or self._bus_limiter.gain < 0.999:
+            self._bus_limiter.process(outdata, bus_pk, sr)
+        np.clip(outdata, -1.0, 1.0, out=outdata)        # последняя страховка (обычно ничего не делает)
 
         if seek_target >= 0:
             # ПЕРЕМОТКА: текущий блок плавно гасим, следующий начнём с новой позиции
