@@ -4,11 +4,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QTableWidget,
+    QLineEdit, QMessageBox, QPushButton, QSpinBox, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from core.fixtures import ATTR_LABELS, FixtureType, save_type_to_library
+from core.fixtures import save_type_to_library
+
+from .fixture_editor import FixtureEditorDialog
 
 
 class AddFixtureDialog(QDialog):
@@ -58,55 +60,6 @@ class AddFixtureDialog(QDialog):
                           + ("  ⚠ больше 512!" if last > 512 else ""))
 
 
-class NewTypeDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Новый тип прибора")
-        self.resize(460, 520)
-        lay = QVBoxLayout(self)
-        form = QFormLayout()
-        self.name = QLineEdit()
-        self.manuf = QLineEdit()
-        form.addRow("Название", self.name)
-        form.addRow("Производитель", self.manuf)
-        lay.addLayout(form)
-        lay.addWidget(QLabel(
-            "Каналы по порядку, по одному в строке, как в инструкции к прибору.\n"
-            "Можно указать значение по умолчанию: pan=128\n"
-            "Младший байт 16-бит: pan_fine, tilt_fine.\n"
-            "Известные атрибуты: " + ", ".join(ATTR_LABELS)))
-        self.text = QPlainTextEdit("dimmer\nred\ngreen\nblue\nstrobe\nmode\nspeed")
-        lay.addWidget(self.text, 1)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.accepted.connect(self._ok)
-        bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
-        self.result_type = None
-
-    def _ok(self):
-        name = self.name.text().strip()
-        if not name:
-            QMessageBox.warning(self, "Ошибка", "Введите название")
-            return
-        chans = []
-        for line in self.text.toPlainText().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            attr, _, dv = line.partition("=")
-            try:
-                default = float(dv) if dv else 0.0
-            except ValueError:
-                QMessageBox.warning(self, "Ошибка", f"Плохое значение: {line}")
-                return
-            chans.append({"attr": attr.strip().lower(), "default": default})
-        if not chans:
-            QMessageBox.warning(self, "Ошибка", "Нет каналов")
-            return
-        self.result_type = FixtureType({"name": name, "manufacturer": self.manuf.text(), "channels": chans})
-        self.accept()
-
-
 class PatchTab(QWidget):
     COLS = ["ID", "Имя", "Тип", "Адрес", "Каналы"]
 
@@ -115,8 +68,10 @@ class PatchTab(QWidget):
         self.show_, self.engine, self.hub, self.lib_folder = show, engine, hub, lib_folder
         lay = QVBoxLayout(self)
         btns = QHBoxLayout()
-        for text, slot in (("Добавить приборы…", self._add), ("Удалить выбранные", self._remove),
-                           ("Новый тип прибора…", self._new_type)):
+        for text, slot in (("Добавить из библиотеки…", self._add),
+                           ("Свой прибор (каналы вручную)…", self._new_type),
+                           ("Изменить каналы прибора…", self._edit_type),
+                           ("Удалить выбранные", self._remove)):
             b = QPushButton(text)
             b.clicked.connect(slot)
             btns.addWidget(b)
@@ -127,8 +82,10 @@ class PatchTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.cellChanged.connect(self._cell_changed)
+        self.table.cellDoubleClicked.connect(self._double_clicked)
         lay.addWidget(self.table)
-        lay.addWidget(QLabel("Имя и адрес можно править двойным щелчком. Красным — пересечение адресов."))
+        lay.addWidget(QLabel("Имя и адрес — двойной щелчок по ячейке. Двойной щелчок по типу — "
+                             "назначить каналы вручную. Красным — пересечение адресов."))
         hub.changed.connect(lambda k: k in ("patch", "all") and self.refresh())
         self.refresh()
 
@@ -206,10 +163,41 @@ class PatchTab(QWidget):
         self.hub.changed.emit("patch")
 
     def _new_type(self):
-        d = NewTypeDialog(self)
+        d = FixtureEditorDialog(self.engine, self.show_, parent=self)
         if not d.exec() or d.result_type is None:
             return
         ft = d.result_type
-        path = save_type_to_library(ft, self.lib_folder)
-        self.show_.library[ft.name] = ft
-        QMessageBox.information(self, "Готово", f"Тип «{ft.name}» сохранён:\n{path}")
+        save_type_to_library(ft, self.lib_folder)
+        with self.engine.lock:
+            self.show_.replace_type(ft.name, ft)          # тип с таким именем мог уже стоять в патче
+            if d.add:
+                count, base, addr = d.add
+                for i in range(count):
+                    name = f"{base} {i + 1}" if count > 1 else base
+                    self.show_.add_fixture(ft.name, name, addr + i * ft.channel_count)
+        self.engine.rebuild_patch()
+        self.refresh()
+        self.hub.changed.emit("patch")
+
+    def _double_clicked(self, row, col):
+        if col == 2:
+            self._edit_type()
+
+    def _edit_type(self):
+        ids = self._selected_ids()
+        if not ids:
+            QMessageBox.information(self, "Каналы", "Выберите прибор в таблице")
+            return
+        fx = self.show_.fixture(ids[0])
+        d = FixtureEditorDialog(self.engine, self.show_, ftype=fx.type, fixture=fx, parent=self)
+        if not d.exec() or d.result_type is None:
+            return
+        ft = d.result_type
+        save_type_to_library(ft, self.lib_folder)
+        with self.engine.lock:
+            self.show_.replace_type(fx.type.name, ft)
+            if d.address.value() + ft.channel_count - 1 <= 512:
+                fx.address = d.address.value()
+        self.engine.rebuild_patch()
+        self.refresh()
+        self.hub.changed.emit("patch")

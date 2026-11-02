@@ -81,6 +81,16 @@ class Show:
         for ef in self.effects.values():
             ef["fixtures"] = [x for x in ef["fixtures"] if x != fid]
 
+    def replace_type(self, old_name, new_type):
+        """Тип прибора изменили в ручном патче — обновить все приборы этого типа."""
+        for f in self.patch:
+            if f.type.name == old_name:
+                f.type = new_type
+        self.types.pop(old_name, None)
+        if any(f.type is new_type for f in self.patch):
+            self.types[new_type.name] = new_type
+        self.library[new_type.name] = new_type
+
     def conflicts(self):
         """id приборов, у которых пересекаются адреса."""
         bad = set()

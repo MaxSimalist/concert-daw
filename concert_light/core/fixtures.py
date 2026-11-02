@@ -32,7 +32,18 @@ SNAP_ATTRS = {
 COLOR_ATTRS = ("red", "green", "blue", "white", "amber", "uv")
 
 
+def is_raw(attr):
+    """Канал без функции: raw1, raw2… (назначается в ручном патче)."""
+    return attr.startswith("raw") and attr[3:].isdigit()
+
+
+def is_snap(attr):
+    return attr in SNAP_ATTRS or is_raw(attr)
+
+
 def attr_label(attr):
+    if is_raw(attr):
+        return f"Канал {attr[3:]}"
     return ATTR_LABELS.get(attr, attr)
 
 

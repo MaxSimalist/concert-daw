@@ -69,11 +69,17 @@ class ProgrammerTab(QWidget):
         self.fade.setRange(0, 60)
         self.fade.setValue(1.0)
         self.fade.setSuffix(" с фейд")
+        self.full = QCheckBox("все каналы приборов")
+        self.full.setChecked(True)
+        self.full.setToolTip("Включено: записывается всё, что сейчас видно на выбранных приборах "
+                             "(диммер, цвет, позиция…), даже то, что вы не трогали.\n"
+                             "Выключено: только тронутые ползунки — для сцен-слоёв "
+                             "(отдельно цвет, отдельно позиция).")
         self.clear_after = QCheckBox("очистить программер")
         self.clear_after.setChecked(True)
         b_rec = QPushButton("● Записать")
         b_rec.clicked.connect(self._record)
-        for w in (self.scene_name, self.fade, self.clear_after, b_rec):
+        for w in (self.scene_name, self.fade, self.full, self.clear_after, b_rec):
             rg.addWidget(w)
         rl.addWidget(rec)
         split.addWidget(right)
@@ -81,8 +87,14 @@ class ProgrammerTab(QWidget):
 
         lay = QVBoxLayout(self)
         lay.addWidget(split)
-        hub.changed.connect(lambda k: k in ("patch", "all") and self.refresh_fixtures())
+        hub.changed.connect(self._on_changed)
         self.refresh_fixtures()
+
+    def _on_changed(self, kind):
+        if kind in ("patch", "all"):
+            self.refresh_fixtures()
+        elif kind == "programmer":
+            self._rebuild()
 
     # --- выбор приборов ---------------------------------------------------
 
@@ -200,9 +212,17 @@ class ProgrammerTab(QWidget):
         if name in self.show_.scenes and QMessageBox.question(
                 self, "Сцена", f"Сцена «{name}» уже есть. Перезаписать?") != QMessageBox.Yes:
             return
-        if not self.engine.record_scene(name, self.fade.value()):
+        if not self.engine.record_scene(name, self.fade.value(), full=self.full.isChecked()):
             QMessageBox.warning(self, "Сцена", "Программер пуст — сначала выставьте значения")
             return
+        sc = self.show_.scenes[name]["values"]
+        dark = [self.show_.fixture(fid).name for fid, v in sc.items()
+                if self.show_.fixture(fid) and v.get("dimmer", 1) == 0]
+        if dark:
+            QMessageBox.information(
+                self, "Сцена", f"Сцена «{name}» записана, но у приборов {', '.join(dark[:5])}"
+                f"{' и др.' if len(dark) > 5 else ''} диммер = 0 — они будут тёмными.\n"
+                "Поднимите «Диммер» (или кнопку «Полный») и запишите сцену ещё раз.")
         if self.clear_after.isChecked():
             self.engine.clear_programmer()
             self._rebuild()

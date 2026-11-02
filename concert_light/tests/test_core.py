@@ -98,6 +98,74 @@ def test_tracking_and_chase():
     print("chase ok")
 
 
+def test_scene_beats_leftover_programmer():
+    """Забытые в программере значения не должны мешать включить сцену."""
+    show = make_show()
+    eng = Engine(show, FakeOutput())
+    show.scenes["Тьма"] = {"fade": 0, "values": {1: {"dimmer": 0, "red": 0}}}
+    show.scenes["Свет"] = {"fade": 0, "values": {1: {"dimmer": 255, "red": 255}}}
+    eng.load_scene_to_programmer("Тьма")          # «В программер (для правки)» и забыли
+    eng.go_scene("Свет")
+    u = eng.compute()
+    assert u[0] == 255 and u[1] == 255, list(u[:3])
+    assert 1 not in eng.programmer
+    eng.set_programmer([1], "blue", 200)          # то, чего нет в сцене, программер держит
+    eng.go_scene("Свет")
+    assert eng.compute()[3] == 200
+    print("сцена главнее программера ok")
+
+
+def test_record_full_fixture_state():
+    """Запись «все каналы»: в сцену попадает и то, что не трогали (диммер)."""
+    show = make_show()
+    eng = Engine(show, FakeOutput())
+    eng.set_programmer([1], "dimmer", 255)
+    eng.record_scene("База", fade=0)
+    eng.clear_programmer()
+    eng.go_scene("База")
+    eng.set_programmer([1], "green", 255)         # тронули только цвет
+    assert eng.record_scene("Зелёный", fade=0, full=True)
+    vals = show.scenes["Зелёный"]["values"][1]
+    assert vals["dimmer"] == 255 and vals["green"] == 255 and "strobe" in vals, vals
+    assert eng.record_scene("Слой", fade=0, full=False)
+    assert show.scenes["Слой"]["values"][1] == {"green": 255.0}
+    eng.clear_programmer()
+    eng.release(0)
+    eng.go_scene("Зелёный")
+    u = eng.compute()
+    assert u[0] == 255 and u[2] == 255, list(u[:4])  # горит, хотя после release диммер был 0
+    print("запись всех каналов ok")
+
+
+def test_manual_patch():
+    """Свой тип с каналами вручную, raw-каналы, проверка каналов, замена типа в патче."""
+    from core.fixtures import FixtureType, attr_label, is_raw
+    show = make_show()
+    eng = Engine(show, FakeOutput())
+    ft = FixtureType({"name": "Мой PAR", "channels": [
+        {"attr": "red", "default": 0}, {"attr": "green", "default": 0}, {"attr": "blue", "default": 0},
+        {"attr": "dimmer", "default": 0}, {"attr": "raw5", "default": 0}, {"attr": "strobe", "default": 0}]})
+    assert is_raw("raw5") and attr_label("raw5") == "Канал 5" and "raw5" in ft.attributes
+    show.library[ft.name] = ft
+    fx = show.add_fixture("Мой PAR", "PAR X", 40)
+    eng.rebuild_patch()
+    eng.set_programmer([fx.id], "dimmer", 255)
+    eng.set_programmer([fx.id], "raw5", 77)
+    u = eng.compute()
+    assert u[42] == 255 and u[43] == 77            # адрес 40: диммер — 4-й канал (43), raw5 — 44
+    eng.test_channels[100] = 33                     # проверка канала — поверх всего
+    assert eng.compute()[99] == 33 and eng.used_channels >= 100
+    eng.test_channels.clear()
+    # поменяли раскладку: диммер стал первым каналом
+    ft2 = FixtureType({"name": "Мой PAR", "channels": [
+        {"attr": "dimmer"}, {"attr": "red"}, {"attr": "green"}, {"attr": "blue"}]})
+    show.replace_type("Мой PAR", ft2)
+    eng.rebuild_patch()
+    u = eng.compute()
+    assert fx.type is ft2 and fx.last_channel == 43 and u[39] == 255, list(u[39:46])
+    print("ручной патч ok")
+
+
 def test_effects():
     show = make_show()
     eng = Engine(show, FakeOutput())
@@ -271,6 +339,9 @@ if __name__ == "__main__":
     test_patch()
     test_scene_fade_and_render()
     test_tracking_and_chase()
+    test_scene_beats_leftover_programmer()
+    test_record_full_fixture_state()
+    test_manual_patch()
     test_effects()
     test_timeline()
     test_save_load()

@@ -13,7 +13,7 @@ import math
 import threading
 import time
 
-from .fixtures import COLOR_ATTRS, SNAP_ATTRS
+from .fixtures import COLOR_ATTRS, is_snap
 
 FPS = 40
 
@@ -25,6 +25,7 @@ class Engine:
         self.lock = threading.RLock()
 
         self.programmer = {}          # fid -> {attr: value}
+        self.test_channels = {}       # DMX-адрес 1..512 -> значение (проверка каналов в ручном патче)
         self.gm = 1.0
         self.blackout = False
 
@@ -85,7 +86,7 @@ class Engine:
             o = {}
             for a, b in to_attrs.items():
                 av = fr.get(a, b)
-                o[a] = b if a in SNAP_ATTRS else av + (b - av) * k
+                o[a] = b if is_snap(a) else av + (b - av) * k
             out[fid] = o
         return out
 
@@ -94,6 +95,15 @@ class Engine:
         if sc is None:
             return False
         with self.lock:
+            # «последнее действие главнее»: то, что задаёт сцена, убираем из программера,
+            # иначе забытые в программере значения перекрывают сцену и она «не включается»
+            for fid, attrs in sc["values"].items():
+                prog = self.programmer.get(fid)
+                if prog:
+                    for a in attrs:
+                        prog.pop(a, None)
+                    if not prog:
+                        del self.programmer[fid]
             now = time.monotonic()
             cur = self._scene_layer(now)
             self._from = cur
@@ -148,12 +158,27 @@ class Engine:
                 for fid in fids:
                     self.programmer.pop(fid, None)
 
-    def record_scene(self, name, fade=1.0):
-        """Записать содержимое программера как сцену. False, если программер пуст."""
+    def record_scene(self, name, fade=1.0, full=True):
+        """Записать сцену из программера. False, если программер пуст.
+
+        full=True — «что видишь, то и записано»: для приборов, которые есть в программере,
+        записываются ВСЕ их каналы так, как они сейчас выглядят (сцена + программер, без эффектов).
+        full=False — только тронутые в программере атрибуты (для сцен-«слоёв»: отдельно цвет,
+        отдельно позиция)."""
         with self.lock:
-            if not any(self.programmer.values()):
+            fids = [fid for fid, v in self.programmer.items() if v]
+            if not fids:
                 return False
-            self.show.scenes[name] = {"fade": float(fade), "values": copy.deepcopy(self.programmer)}
+            if full:
+                base = self._scene_layer(time.monotonic())
+                values = {}
+                for fid in fids:
+                    st = dict(base.get(fid, {}))
+                    st.update(self.programmer[fid])
+                    values[fid] = st
+            else:
+                values = copy.deepcopy(self.programmer)
+            self.show.scenes[name] = {"fade": float(fade), "values": values}
             return True
 
     def load_scene_to_programmer(self, name):
@@ -294,10 +319,14 @@ class Engine:
                         uni[addr] = int(round((v - int(v)) * 255))
                     else:
                         uni[addr] = int(st.get(a, 0.0))
+            for addr, v in self.test_channels.items():   # проверка каналов — поверх всего
+                if 1 <= addr <= 512:
+                    uni[addr - 1] = max(0, min(255, int(v)))
             self.state = state
             self.universe = uni
             # сколько каналов реально занято — uDMX не гоняет по USB пустые
-            self.used_channels = max((fx.last_channel for fx in self.show.patch), default=1)
+            self.used_channels = max([fx.last_channel for fx in self.show.patch]
+                                     + list(self.test_channels) + [1])
             return uni
 
     # ------------------------------------------------------------------

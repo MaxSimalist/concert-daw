@@ -73,7 +73,8 @@ class ScenesTab(QWidget):
         b.clicked.connect(self._release)
         rf.addRow(b)
         side.addWidget(rel)
-        side.addWidget(QLabel("Щелчок по сцене — включить.\nПравка сцены: «В программер» →\nизменить → записать под тем же именем."))
+        side.addWidget(QLabel("Щелчок по сцене — включить,\nещё раз — выключить.\n"
+                              "Правка сцены: «В программер» →\nизменить → записать под тем же именем."))
         side.addStretch()
         lay.addLayout(side)
 
@@ -110,9 +111,15 @@ class ScenesTab(QWidget):
 
     def _go(self, item):
         name = item.data(Qt.UserRole)
+        fade = float(self.show_.scenes[name].get("fade", 0))
         self.engine.stop_chase()
-        self.engine.go_scene(name)
-        self.hub.action.emit("scene", name, float(self.show_.scenes[name].get("fade", 0)))
+        if self.engine.current_scene == name:          # повторное нажатие — выключить сцену
+            self.engine.release(fade)
+            self.hub.action.emit("release", "", fade)
+        else:
+            self.engine.go_scene(name)
+            self.hub.action.emit("scene", name, fade)
+        self.hub.changed.emit("programmer")             # сцена могла убрать значения из программера
 
     def _selected(self, *_):
         name = self._current_name()
