@@ -345,8 +345,9 @@ def render_track(cfg: TrackConfig, edit: SongEdit, samplerate: int,
 # ──────────────────────────────────────────────────────────────────────────────
 # Обзор волны для редактора
 # ──────────────────────────────────────────────────────────────────────────────
-def compute_overview(song: Song, bins: int = 1600) -> tuple[np.ndarray, float]:
+def compute_overview(song: Song, bins: Optional[int] = None) -> tuple[np.ndarray, float]:
     """Пики всей песни (максимум по всем дорожкам) для отрисовки волны.
+    По умолчанию 200 столбиков на секунду (5 мс) — хватает для увеличения в редакторе.
     Возвращает (пики 0..1, длительность исходника в секундах)."""
     infos = []
     for cfg in song.tracks:
@@ -357,6 +358,8 @@ def compute_overview(song: Song, bins: int = 1600) -> tuple[np.ndarray, float]:
     if not infos:
         return np.zeros(bins, np.float32), 0.0
     duration = max(i.frames / i.samplerate for _, i in infos)
+    if bins is None:
+        bins = int(min(200_000, max(1600, duration * 200)))
     peaks = np.zeros(bins, np.float32)
     for cfg, info in infos:
         try:

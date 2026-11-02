@@ -15,7 +15,7 @@ from PySide6.QtCore import QObject, QRunnable, QRectF, Qt, QThreadPool, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QSpinBox,
                                QGroupBox, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
-                               QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                               QPushButton, QScrollBar, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from audio_edit import STRETCH_AVAILABLE, compute_overview, detect_silence, export_song
 from gui_icons import set_icon
@@ -95,44 +95,110 @@ class _ExportTask(QRunnable):
 # Волна с маркерами начала/конца
 # ──────────────────────────────────────────────────────────────────────────────
 class WaveformView(QWidget):
-    """Тяните зелёный маркер — начало, красный — конец. Клик ставит ближайший маркер."""
+    """Волна трека с маркерами обрезки. Тяните зелёный маркер — начало, красный — конец.
+
+    Увеличение (для точной обрезки):
+    * колесо мыши — увеличить/уменьшить вокруг курсора;
+    * Shift + колесо или полоса прокрутки под волной — листать по времени;
+    * зажатая средняя кнопка (колёсико) — тащить волну;
+    * двойной клик — показать трек целиком.
+    """
     markers_changed = Signal(float, float)
+    view_changed = Signal()
+
+    MAX_ZOOM_SECONDS = 0.25          # самое сильное увеличение: на всю ширину — четверть секунды
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(140)
         self.setMouseTracking(True)
         self.peaks: Optional[np.ndarray] = None
         self.duration = 0.0
         self.start = 0.0
         self.end = 0.0
+        self.view_start = 0.0            # что видно: с какой секунды…
+        self.view_len = 0.0              # …и сколько секунд (0 — весь трек)
         self._drag: Optional[str] = None
+        self._pan: Optional[tuple[float, float]] = None
+        self.setToolTip("Колесо — увеличить/уменьшить, Shift+колесо — листать, "
+                        "колёсико зажать — тащить, двойной клик — весь трек")
 
+    # ── данные ─────────────────────────────────────────────────────────────
     def set_data(self, peaks: np.ndarray, duration: float) -> None:
         self.peaks, self.duration = peaks, duration
         if self.end <= 0 or self.end > duration:
             self.end = duration
+        if self.view_len <= 0 or self.view_len > duration:
+            self.view_start, self.view_len = 0.0, duration
         self.update()
+        self.view_changed.emit()
 
     def set_markers(self, start: float, end: float) -> None:
         self.start, self.end = start, end
         self.update()
 
+    # ── вид ────────────────────────────────────────────────────────────────
+    def _vlen(self) -> float:
+        return self.view_len if self.view_len > 0 else max(self.duration, 1e-6)
+
+    def set_view(self, start: float, length: float) -> None:
+        if not self.duration:
+            return
+        length = min(self.duration, max(self.MAX_ZOOM_SECONDS, length))
+        start = min(max(0.0, start), max(0.0, self.duration - length))
+        if (start, length) != (self.view_start, self.view_len):
+            self.view_start, self.view_len = start, length
+            self.update()
+            self.view_changed.emit()
+
+    def zoom(self, factor: float, around: Optional[float] = None) -> None:
+        """factor < 1 — увеличить. around — момент времени, который остаётся на месте."""
+        if not self.duration:
+            return
+        vl = self._vlen()
+        t = self.view_start + vl / 2 if around is None else around
+        frac = (t - self.view_start) / vl
+        new_len = min(self.duration, max(self.MAX_ZOOM_SECONDS, vl * factor))
+        self.set_view(t - frac * new_len, new_len)
+
+    def show_all(self) -> None:
+        self.set_view(0.0, self.duration)
+
+    def focus(self, t: float, seconds: float = 4.0) -> None:
+        """Увеличить вокруг момента t (например, маркера обрезки)."""
+        self.set_view(t - seconds / 2, seconds)
+
+    @property
+    def zoom_factor(self) -> float:
+        return self.duration / self._vlen() if self.duration else 1.0
+
     def _x(self, t: float) -> float:
-        return t / self.duration * self.width() if self.duration else 0.0
+        return (t - self.view_start) / self._vlen() * self.width()
 
     def _t(self, x: float) -> float:
-        return min(max(x / max(1, self.width()) * self.duration, 0.0), self.duration)
+        t = self.view_start + x / max(1, self.width()) * self._vlen()
+        return min(max(t, 0.0), self.duration)
 
+    # ── мышь ───────────────────────────────────────────────────────────────
     def mousePressEvent(self, e) -> None:
         if not self.duration:
             return
         x = e.position().x()
+        if e.button() == Qt.MiddleButton:
+            self._pan = (x, self.view_start)
+            self.setCursor(Qt.ClosedHandCursor)
+            return
+        if e.button() != Qt.LeftButton:
+            return
         self._drag = "start" if abs(x - self._x(self.start)) <= abs(x - self._x(self.end)) else "end"
         self._move(x)
 
     def mouseMoveEvent(self, e) -> None:
         x = e.position().x()
+        if self._pan is not None:
+            x0, s0 = self._pan
+            self.set_view(s0 - (x - x0) / max(1, self.width()) * self._vlen(), self._vlen())
+            return
         if self._drag:
             self._move(x)
         elif self.duration:
@@ -141,6 +207,22 @@ class WaveformView(QWidget):
 
     def mouseReleaseEvent(self, _e) -> None:
         self._drag = None
+        if self._pan is not None:
+            self._pan = None
+            self.setCursor(Qt.ArrowCursor)
+
+    def mouseDoubleClickEvent(self, _e) -> None:
+        self.show_all()
+
+    def wheelEvent(self, e) -> None:
+        if not self.duration:
+            return
+        steps = e.angleDelta().y() / 120.0 or e.angleDelta().x() / 120.0
+        if e.modifiers() & Qt.ShiftModifier or abs(e.angleDelta().x()) > abs(e.angleDelta().y()):
+            self.set_view(self.view_start - steps * self._vlen() * 0.15, self._vlen())     # листать
+        else:
+            self.zoom(0.8 ** steps, self._t(e.position().x()))                           # увеличение
+        e.accept()
 
     def _move(self, x: float) -> None:
         t = self._t(x)
@@ -151,6 +233,7 @@ class WaveformView(QWidget):
         self.update()
         self.markers_changed.emit(self.start, self.end)
 
+    # ── рисование ──────────────────────────────────────────────────────────
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
         w, h = self.width(), self.height()
@@ -159,29 +242,62 @@ class WaveformView(QWidget):
             p.setPen(QColor("#7f8b97"))
             p.drawText(self.rect(), Qt.AlignCenter, "Загрузка волны…")
             return
-        mid = h / 2
+        ruler = 16
+        mid = ruler + (h - ruler) / 2
+        amp_h = (h - ruler) / 2 * 0.92
         n = len(self.peaks)
-        p.setPen(QPen(QColor("#36d399"), 1))
-        if n:
-            cols = self.peaks[(np.arange(w) * n // max(1, w)).clip(0, n - 1)]
+        if n and self.duration and w > 0:
+            # столбик на пиксель: максимум пиков, попавших в пиксель (при увеличении — растягиваем)
+            vs, vl = self.view_start, self._vlen()
+            edges = ((vs + np.arange(w + 1) * vl / w) / self.duration * n).astype(int).clip(0, n - 1)
+            starts, stops = edges[:-1], np.maximum(edges[1:], edges[:-1] + 1)
+            upto = self.peaks[:int(edges[-1]) + 1]           # иначе последний пиксель «видит» весь хвост
+            cols = np.maximum.reduceat(upto, starts) if len(starts) else np.zeros(0)
+            # reduceat берёт до следующего старта; при растяжении (несколько пикселей на столбик) — сам столбик
+            cols = np.where(stops - starts <= 1, self.peaks[starts], cols)
+            p.setPen(QPen(QColor("#36d399"), 1))
             for x in range(w):
-                a = float(cols[x]) * mid * 0.92
+                a = float(cols[x]) * amp_h
                 p.drawLine(x, int(mid - a), x, int(mid + a))
+        self._draw_ruler(p, w, ruler)
         # затемняем то, что отрезается
         xs, xe = self._x(self.start), self._x(self.end)
         shade = QColor(0, 0, 0, 170)
-        p.fillRect(QRectF(0, 0, xs, h), shade)
-        p.fillRect(QRectF(xe, 0, w - xe, h), shade)
+        if xs > 0:
+            p.fillRect(QRectF(0, ruler, min(xs, w), h - ruler), shade)
+        if xe < w:
+            p.fillRect(QRectF(max(0.0, xe), ruler, w - max(0.0, xe), h - ruler), shade)
         # маркеры
         for x, color, label, align in ((xs, "#36d399", fmt_precise(self.start), Qt.AlignLeft),
                                        (xe, "#ef4b55", fmt_precise(self.end), Qt.AlignRight)):
-            p.setPen(QPen(QColor(color), 2))
-            p.drawLine(int(x), 0, int(x), h)
-            p.fillRect(QRectF(x - 6, 0, 12, 12), QColor(color))
-            box = QRectF(x + 8, 14, 110, 20) if align == Qt.AlignLeft else QRectF(x - 118, 14, 110, 20)
-            p.setPen(QColor("#e6eaee"))
-            p.drawText(box, align | Qt.AlignVCenter, label)
+            if -12 <= x <= w + 12:
+                p.setPen(QPen(QColor(color), 2))
+                p.drawLine(int(x), ruler, int(x), h)
+                p.fillRect(QRectF(x - 6, ruler, 12, 12), QColor(color))
+                box = QRectF(x + 8, ruler + 14, 110, 20) if align == Qt.AlignLeft else \
+                    QRectF(x - 118, ruler + 14, 110, 20)
+                p.setPen(QColor("#e6eaee"))
+                p.drawText(box, align | Qt.AlignVCenter, label)
+        if self.zoom_factor > 1.01:
+            p.setPen(QColor("#f7c948"))
+            p.drawText(QRectF(0, ruler, w - 6, 16), Qt.AlignRight | Qt.AlignVCenter,
+                       f"увеличение ×{self.zoom_factor:.0f}  (двойной клик — весь трек)")
         p.end()
+
+    def _draw_ruler(self, p: QPainter, w: int, hgt: int) -> None:
+        """Шкала времени сверху: шаг подбирается под масштаб."""
+        p.fillRect(QRectF(0, 0, w, hgt), QColor("#14181c"))
+        vl = self._vlen()
+        step = next((s for s in (0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120)
+                     if s / vl * w >= 70), 300)
+        t = np.ceil(self.view_start / step) * step
+        p.setPen(QColor("#7f8b97"))
+        while t <= self.view_start + vl:
+            x = self._x(t)
+            p.drawLine(int(x), hgt - 5, int(x), hgt)
+            label = fmt_precise(t) if step < 1 else f"{int(t // 60)}:{int(t % 60):02d}"
+            p.drawText(QRectF(x + 3, 0, 90, hgt), Qt.AlignLeft | Qt.AlignVCenter, label)
+            t += step
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -208,7 +324,32 @@ class SongEditorDialog(QDialog):
         lay = QVBoxLayout(self)
         self.wave = WaveformView()
         self.wave.markers_changed.connect(self._on_markers)
-        lay.addWidget(self.wave)
+        lay.addWidget(self.wave, 1)
+        # прокрутка и кнопки масштаба под волной
+        self.wave_scroll = QScrollBar(Qt.Horizontal)
+        self.wave_scroll.setRange(0, 0)
+        self.wave_scroll.valueChanged.connect(self._on_wave_scroll)
+        lay.addWidget(self.wave_scroll)
+        zr = QHBoxLayout()
+        for text, tip, fn in (("−", "Уменьшить (колесо мыши вниз)", lambda: self.wave.zoom(1.6)),
+                              ("+", "Увеличить (колесо мыши вверх)", lambda: self.wave.zoom(1 / 1.6)),
+                              ("Весь трек", "Показать трек целиком (двойной клик по волне)", self.wave.show_all),
+                              ("◀ Начало обрезки", "Увеличить вокруг зелёного маркера — точно поставить начало",
+                               lambda: self.wave.focus(self.wave.start)),
+                              ("Конец обрезки ▶", "Увеличить вокруг красного маркера — точно поставить конец",
+                               lambda: self.wave.focus(self.wave.end))):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.setFocusPolicy(Qt.NoFocus)
+            if len(text) == 1:
+                b.setFixedWidth(36)
+            b.clicked.connect(fn)
+            zr.addWidget(b)
+        hint = QLabel("Колесо мыши — увеличить, Shift+колесо — листать, колёсико зажать — тащить")
+        hint.setObjectName("caption")
+        zr.addWidget(hint, 1)
+        lay.addLayout(zr)
+        self.wave.view_changed.connect(self._sync_wave_scroll)
 
         # ── обрезка ─────────────────────────────────────────────────────────
         trim = QGroupBox("Обрезка и фейды")
@@ -405,6 +546,20 @@ class SongEditorDialog(QDialog):
         for s in (self.start_spin, self.end_spin, self.fade_in, self.fade_out,
                   self.speed_spin, self.bpm_spin, self.pitch_spin):
             s.blockSignals(on)
+
+    def _sync_wave_scroll(self) -> None:
+        """Полоса прокрутки ← видимая часть волны (в сотых секунды)."""
+        w = self.wave
+        sb = self.wave_scroll
+        sb.blockSignals(True)
+        sb.setRange(0, int(max(0.0, w.duration - w._vlen()) * 100))
+        sb.setPageStep(max(1, int(w._vlen() * 100)))
+        sb.setSingleStep(max(1, int(w._vlen() * 10)))
+        sb.setValue(int(w.view_start * 100))
+        sb.blockSignals(False)
+
+    def _on_wave_scroll(self, v: int) -> None:
+        self.wave.set_view(v / 100.0, self.wave._vlen())
 
     def _on_overview(self, peaks, duration: float) -> None:
         if duration and not self.song.duration:
