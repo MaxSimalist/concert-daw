@@ -48,6 +48,19 @@ LANE_H = 42
 _peaks_cache: dict[tuple, tuple[np.ndarray, float]] = {}
 
 
+ZOOM_MIN, ZOOM_MAX, ZOOM_STEPS = 0.5, 400.0, 1000    # пикселей на секунду; делений ползунка
+
+
+def zoom_to_pps(v: int) -> float:
+    return ZOOM_MIN * (ZOOM_MAX / ZOOM_MIN) ** (max(0, min(ZOOM_STEPS, v)) / ZOOM_STEPS)
+
+
+def pps_to_zoom(pps: float) -> int:
+    import math
+    pps = max(ZOOM_MIN, min(ZOOM_MAX, pps))
+    return int(round(ZOOM_STEPS * math.log(pps / ZOOM_MIN) / math.log(ZOOM_MAX / ZOOM_MIN)))
+
+
 def fmt(t: float) -> str:
     sign = "-" if t < 0 else ""
     t = abs(t)
@@ -399,10 +412,15 @@ class TimelinePanel(QWidget):
             b.clicked.connect(fn)
             bar.addWidget(b)
         bar.addWidget(QLabel("Масштаб:"))
+        # масштаб — логарифмический: каждый шаг ползунка меняет масштаб в одно и то же число раз
+        # (раньше 1…400 пикс/с линейно — у левого края ползунок прыгал в разы от малейшего движения)
         self.zoom = QSlider(Qt.Horizontal)
-        self.zoom.setRange(1, 400)
-        self.zoom.setValue(20)
-        self.zoom.setFixedWidth(120)
+        self.zoom.setRange(0, ZOOM_STEPS)
+        self.zoom.setSingleStep(15)            # колесо мыши / стрелки: ~×1.1
+        self.zoom.setPageStep(100)
+        self.zoom.setValue(pps_to_zoom(20.0))
+        self.zoom.setFixedWidth(150)
+        self.zoom.setToolTip("Масштаб времени (колесо мыши над ползунком — плавно)")
         self.zoom.valueChanged.connect(self._on_zoom)
         bar.addWidget(self.zoom)
         fit = QPushButton(" По размеру")
@@ -768,7 +786,7 @@ class TimelinePanel(QWidget):
 
     def _on_zoom(self, v: int) -> None:
         center = self.view.start + self._visible_seconds() / 2
-        self.view.pps = float(v)
+        self.view.pps = zoom_to_pps(v)
         self.view.start = max(0.0, center - self._visible_seconds() / 2)
         self._update_duration()
         self.hscroll.setValue(int(self.view.start * 10))
@@ -778,8 +796,8 @@ class TimelinePanel(QWidget):
         self.view.changed.emit()
 
     def fit(self) -> None:
-        pps = max(1, int(self.ruler.width() / max(1.0, self.view.duration)))
-        self.zoom.setValue(pps)
+        pps = self.ruler.width() / max(1.0, self.view.duration)
+        self.zoom.setValue(pps_to_zoom(pps))
         self.hscroll.setValue(0)
 
     def set_playhead(self, t: float, playing: bool) -> None:
