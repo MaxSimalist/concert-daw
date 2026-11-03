@@ -62,9 +62,10 @@ class Output:
     RESET_PAUSE = 0.15       # пауза после сброса порта, с
     FRESH_CTX_SEC = 5.0      # uDMX не находится столько секунд — новый контекст libusb
     FULL_REFRESH_SEC = 5.0   # раз в N секунд переслать всё (на случай сбоя внутри uDMX)
-    GENTLE_RATE = 10         # бережный режим: не чаще 10 раз в секунду,
-    GENTLE_CHUNK = 32        # кусками по 32 канала
-    GENTLE_GAP = 0.003       # с паузой 3 мс между кусками
+    # Бережный режим: только реже слать, посылки НЕ дробить. По журналам клона uDMX:
+    # 20 раз/с — зависание раз в 20–40 с; 10 раз/с мелкими кусками — раз в 20 с (дробление
+    # добавляет обращений к USB); 5 раз/с обычными посылками — раз в ~3 минуты.
+    GENTLE_RATE = 5
 
     def __init__(self, enabled=True, rate=20, log_path=None, gentle=False):
         self.enabled = enabled
@@ -164,6 +165,12 @@ class Output:
         self.status = f"Связь с uDMX потеряна: {reason} — переподключаюсь…"
         self._last_try = 0.0                          # пробуем сразу, без паузы
 
+    def set_rate(self, rate):
+        rate = int(rate)
+        if rate != self.rate:
+            self._log(f"частота отправки: {rate} раз/с")
+        self.rate = rate
+
     def set_gentle(self, on):
         on = bool(on)
         if on != self.gentle:
@@ -173,8 +180,8 @@ class Output:
 
     def _apply_gentle(self):
         if self.dev is not None:
-            self.dev.chunk = self.GENTLE_CHUNK if self.gentle else 128
-            self.dev.gap = self.GENTLE_GAP if self.gentle else 0.0
+            self.dev.chunk = 128
+            self.dev.gap = 0.0
 
     def reconnect(self):
         """Кнопка «Переподключить» в настройках."""

@@ -119,13 +119,15 @@ class UdmxTab(QWidget):
         self.rate.setRange(5, 44)
         self.rate.setSuffix(" раз/с")
         self.rate.setValue(int(settings.udmx_rate or 20))
-        self.rate.setToolTip("Как часто слать изменения на uDMX. Если связь рвётся — уменьшите до 10–15.")
-        self.rate.valueChanged.connect(lambda v: setattr(output, "rate", v))
+        self.rate.setToolTip("Как часто слать изменения на uDMX. Если uDMX виснет — уменьшайте "
+                             "(клоны часто стабильны только на 5–10).")
+        self.rate.valueChanged.connect(output.set_rate)
         f.addRow("Частота отправки:", self.rate)
         self.gentle = QCheckBox("Бережный режим (для клонов, которые зависают и отключаются)")
         self.gentle.setChecked(bool(settings.udmx_gentle))
-        self.gentle.setToolTip("Не чаще 10 раз в секунду, маленькими посылками по 32 канала с паузами.\n"
-                               "Фейды станут чуть менее плавными, зато слабой прошивке легче.")
+        self.gentle.setToolTip("Не чаще 5 раз в секунду, что бы ни стояло в «Частоте отправки».\n"
+                               "Клоны uDMX виснут от частых обращений по USB: на 5 раз/с — в разы реже.\n"
+                               "Медленные фейды и движение голов пойдут заметными ступеньками.")
         self.gentle.toggled.connect(output.set_gentle)
         f.addRow(self.gentle)
         row = QHBoxLayout()

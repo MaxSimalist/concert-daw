@@ -276,14 +276,14 @@ def test_readable_libusb0_errors():
 
 
 def test_gentle_mode():
+    """Бережный режим = реже (5 раз/с), посылки не дробятся (дробление добавляло обращений к USB)."""
     dev, out, log = make()
-    out.rate = 20
+    out.set_rate(20)
     out.set_gentle(True)
     u = bytearray(512)
     u[0], u[299] = 1, 2
     out.send(u)
-    assert out.dev.chunk == 32 and all(len(d) <= 32 for _, d in dev.transfers)
-    n = len(dev.transfers)
+    assert out.dev.chunk == 128 and len(dev.transfers) == 3      # 300 каналов = 3 посылки по 128
     sent = 0
     for i in range(20):                 # 1 секунда по 50 мс, меняем канал каждый кадр
         u[0] = i + 2
@@ -291,10 +291,10 @@ def test_gentle_mode():
         out.send(u)
         sent += len(dev.transfers) > before
         CLOCK.tick(0.05)
-    assert sent <= 11, sent             # не чаще 10 раз/с
+    assert sent <= 5, sent              # не чаще 5 раз/с
     out.set_gentle(False)
-    assert out.dev.chunk == 128
-    assert "бережный режим" in log.read_text("utf-8")
+    text = log.read_text("utf-8")
+    assert "бережный режим включён вручную" in text and "частота отправки: 20" in text
     print("бережный режим ok:", sent, "посылок/с")
 
 
