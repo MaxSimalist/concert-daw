@@ -298,21 +298,44 @@ def test_gentle_mode():
     print("бережный режим ok:", sent, "посылок/с")
 
 
-def test_auto_gentle_when_flaky():
-    """Как в журнале 0.9.6: после первого зависания прошивка виснет каждые несколько секунд."""
+def test_fast_recovery_from_stall():
+    """Как в часовом журнале: прошивка виснет раз в 20–40 с. Каждое зависание — как можно короче."""
     dev, out, log = make()
     u = bytearray(512)
     run(out, u, 1, change=0)
-    assert not out.gentle
-    for _ in range(2):
-        dev.stalled = True
-        run(out, u, 2, change=0)
-    assert out.gentle and out.auto_gentle and out.dev.chunk == 32, out.status
-    assert "бережный режим включён автоматически" in log.read_text("utf-8")
-    assert out.connected and out.stats["reconnects"] == 0
-    out.set_gentle(False)                        # человек выключил сам — его решение главнее
-    assert not out.gentle and not out.auto_gentle
-    print("бережный режим сам при сбоях ok:", out.stats["resets"], "сброса")
+    dev.stalled = True
+    t0 = CLOCK.t
+    while dev.stalled:                           # до сброса — одна ошибка, без «трёх попыток»
+        u[0] = (u[0] + 1) % 256
+        out.send(u)
+        CLOCK.tick(0.05)
+    freeze = CLOCK.t - t0
+    n = len(dev.transfers)
+    run(out, u, 0.3, change=0)
+    assert dev.resets == 1 and out.stats["errors"] == 1 and len(dev.transfers) > n
+    assert freeze <= 0.1, freeze
+    assert not out.gentle                        # бережный режим сам больше не включается
+    print("быстрый выход из зависания ok:", out.stats["errors"], "ошибка на сбой")
+
+
+def test_fast_retry_after_loss_and_summary():
+    dev, out, log = make()
+    u = bytearray(512)
+    run(out, u, 0.5)
+    dev.gone = True
+    DEVICES.clear()
+    run(out, u, 0.2, change=0)
+    assert out.dev is None
+    DEVICES[:] = [FakeDev()]
+    run(out, u, 0.7)                             # вернулся через ~1 с — найден за полсекунды
+    assert out.connected, out.status
+    for _ in range(3):                           # ещё сбои, затем 10 минут работы
+        out.dev.dev.stalled = True               # out.dev — UDMX, out.dev.dev — поддельный USB
+        run(out, u, 1, change=0)
+    CLOCK.tick(Output.SUMMARY_SEC)
+    out.send(u)
+    assert "за 10 мин: сбросов порта" in log.read_text("utf-8"), log.read_text("utf-8")
+    print("быстрый поиск после потери и сводка за 10 минут ok")
 
 
 def test_rate_limit_and_driver_hint():
@@ -341,5 +364,6 @@ if __name__ == "__main__":
     test_rate_limit_and_driver_hint()
     test_readable_libusb0_errors()
     test_gentle_mode()
-    test_auto_gentle_when_flaky()
+    test_fast_recovery_from_stall()
+    test_fast_retry_after_loss_and_summary()
     print("ВСЕ ТЕСТЫ ВЫВОДА ПРОЙДЕНЫ")

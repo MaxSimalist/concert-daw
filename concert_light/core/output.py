@@ -53,22 +53,25 @@ _STUCK_WORDS = ("pipe", "не опознает команду", "does not recogn
 
 class Output:
     RETRY_SEC = 2.0
+    FAST_RETRY_SEC = 0.5     # сразу после потери uDMX ищем его чаще (он возвращается за 1–2 с)
+    FAST_RETRY_WINDOW = 10.0
+    SUMMARY_SEC = 600.0      # раз в 10 минут — сводка сбоев в журнал (повторы там прореживаются)
     FAIL_LIMIT = 10          # ошибок подряд до переподключения
     BACKOFF = 0.2            # пауза после ошибки посылки, с
-    PIPE_RESET = 3           # столько Errno 32 подряд — сброс USB-порта
+    PIPE_RESET = 1           # прошивка зависла — сброс порта сразу (сама она не отвисает)
+    RESET_PAUSE = 0.15       # пауза после сброса порта, с
     FRESH_CTX_SEC = 5.0      # uDMX не находится столько секунд — новый контекст libusb
     FULL_REFRESH_SEC = 5.0   # раз в N секунд переслать всё (на случай сбоя внутри uDMX)
     GENTLE_RATE = 10         # бережный режим: не чаще 10 раз в секунду,
     GENTLE_CHUNK = 32        # кусками по 32 канала
     GENTLE_GAP = 0.003       # с паузой 3 мс между кусками
-    AUTO_GENTLE_RESETS = 2   # столько сбросов порта за минуту — бережный режим включается сам
 
     def __init__(self, enabled=True, rate=20, log_path=None, gentle=False):
         self.enabled = enabled
         self.rate = rate
         self.gentle = gentle
-        self.auto_gentle = False      # бережный режим включён программой сама (uDMX начал сбоить)
-        self._reset_times = []
+        self._summary_at = 0.0
+        self._summary_base = (0, 0)
         self.log_path = log_path
         self.dev = None
         self.status = "Нет устройства"
@@ -166,7 +169,6 @@ class Output:
         if on != self.gentle:
             self._log(f"бережный режим {'включён' if on else 'выключен'} вручную")
         self.gentle = on
-        self.auto_gentle = False
         self._apply_gentle()
 
     def _apply_gentle(self):
@@ -185,8 +187,10 @@ class Output:
 
     def send(self, universe):
         now = time.monotonic()
+        self._summary(now)
         if self.dev is None:
-            if now - self._last_try >= self.RETRY_SEC:
+            fast = self._lost_at is not None and now - self._lost_at < self.FAST_RETRY_WINDOW
+            if now - self._last_try >= (self.FAST_RETRY_SEC if fast else self.RETRY_SEC):
                 self._connect()
             if self.dev is None:
                 return
@@ -209,9 +213,7 @@ class Output:
             self._pipe = 0
             if not self.connected:
                 self.connected = True
-            self.status = f"uDMX подключён ({self.dev.backend})" + (
-                ", бережный режим включён автоматически" if self.auto_gentle else
-                ", бережный режим" if self.gentle else "")
+            self.status = f"uDMX подключён ({self.dev.backend})" + (", бережный режим" if self.gentle else "")
         except Exception as e:
             self._fails += 1
             self.stats["errors"] += 1
@@ -235,18 +237,28 @@ class Output:
         try:
             self.dev.reset()
             self.dev.invalidate(self.limit)
-            now = time.monotonic()
-            self._backoff_until = now + 0.5               # даём uDMX переинициализироваться
+            self._backoff_until = time.monotonic() + self.RESET_PAUSE
+            self._fails = 0
             self._log("сброс USB-порта uDMX (прошивка не отвечает на посылки)")
-            self._reset_times = [t for t in self._reset_times if now - t < 60] + [now]
-            if not self.gentle and len(self._reset_times) >= self.AUTO_GENTLE_RESETS:
-                self.gentle = self.auto_gentle = True
-                self._apply_gentle()
-                self._log(f"uDMX сбоит ({len(self._reset_times)} сброса за минуту) — "
-                          "бережный режим включён автоматически")
         except Exception as e:
             self._log(f"сброс USB-порта не удался: {readable_error(e)}")
             self._drop(f"сброс не удался: {readable_error(e)}")
+
+    def _summary(self, now):
+        """Сводка за 10 минут: в журнале одинаковые строки прореживаются, а так видно частоту сбоев."""
+        if not self._summary_at:
+            self._summary_at = now
+            return
+        if now - self._summary_at < self.SUMMARY_SEC:
+            return
+        resets = self.stats["resets"] - self._summary_base[0]
+        drops = self.stats["reconnects"] - self._summary_base[1]
+        if resets or drops:
+            mins = (now - self._summary_at) / 60
+            self._log(f"за {mins:.0f} мин: сбросов порта {resets}, переподключений {drops}"
+                      + (f" (в среднем сбой раз в {(now - self._summary_at) / max(1, resets + drops):.0f} с)"))
+        self._summary_at = now
+        self._summary_base = (self.stats["resets"], self.stats["reconnects"])
 
     @staticmethod
     def _is_pipe(exc):
