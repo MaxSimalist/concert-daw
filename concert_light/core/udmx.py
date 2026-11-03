@@ -130,6 +130,8 @@ class UDMX:
             except usb.core.USBError:
                 pass
         self.universe = bytearray(DMX_CHANNELS)
+        self.chunk = CHUNK          # каналов в одной посылке (бережный режим — меньше)
+        self.gap = 0.0              # пауза между кусками одной посылки, с
 
     # --- низкий уровень -------------------------------------------------
 
@@ -148,8 +150,10 @@ class UDMX:
         data = bytes(max(0, min(255, int(v))) for v in values)
         if start_channel - 1 + len(data) > DMX_CHANNELS:
             raise UDMXError("Выход за пределы 512 каналов")
-        for off in range(0, len(data), CHUNK):
-            part = data[off:off + CHUNK]
+        for off in range(0, len(data), self.chunk):
+            if off and self.gap:
+                time.sleep(self.gap)
+            part = data[off:off + self.chunk]
             first = start_channel - 1 + off
             sent = self.dev.ctrl_transfer(
                 REQ_TYPE_OUT, CMD_SET_CHANNEL_RANGE, len(part), first, part, self.timeout

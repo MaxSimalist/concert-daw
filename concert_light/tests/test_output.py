@@ -244,6 +244,60 @@ def test_long_failure_reconnects():
     print("долгий сбой -> переподключение и полная пересылка ok")
 
 
+# ошибки из настоящего журнала (libusb0 на русской Windows)
+LOG_GEN = ("[Errno None] b'libusb0-dll:err [control_msg] sending control message failed, win error: "
+           "\\xcf\\xf0\\xe8\\xf1\\xee\\xe5\\xe4\\xe8\\xed\\xe5\\xed\\xed\\xee\\xe5 \\xea \\xf1\\xe8\\xf1\\xf2\\xe5\\xec\\xe5 "
+           "\\xf3\\xf1\\xf2\\xf0\\xee\\xe9\\xf1\\xf2\\xe2\\xee \\xed\\xe5 \\xf0\\xe0\\xe1\\xee\\xf2\\xe0\\xe5\\xf2.\\r\\n\\n'")
+LOG_GONE = ("[Errno None] b'libusb0-dll:err [control_msg] sending control message failed, win error: "
+            "\\xd3\\xea\\xe0\\xe7\\xe0\\xed\\xee \\xed\\xe5\\xf1\\xf3\\xf9\\xe5\\xf1\\xf2\\xe2\\xf3\\xfe\\xf9\\xe5\\xe5 "
+            "\\xf3\\xf1\\xf2\\xf0\\xee\\xe9\\xf1\\xf2\\xe2\\xee.\\r\\n\\n'")
+
+
+class LibusbError(IOError):
+    def __init__(self, text, code=-5):
+        super().__init__(text)
+        self.backend_error_code = code
+        self.errno = None
+
+    def __str__(self):
+        return self.args[0]
+
+
+def test_readable_libusb0_errors():
+    from core.output import readable_error
+    a = readable_error(LibusbError(LOG_GEN))
+    b = readable_error(LibusbError(LOG_GONE))
+    assert "Присоединенное к системе устройство не работает" in a and "\\x" not in a, a
+    assert "Указано несуществующее устройство" in b, b
+    assert Output._is_gone(LibusbError(LOG_GONE), "libusb0")
+    assert not Output._is_gone(LibusbError(LOG_GEN), "libusb0")     # -5 у libusb0 — не «пропал»
+    assert Output._is_pipe(LibusbError(LOG_GEN))                   # «не работает» — сброс порта
+    print("ошибки libusb0 по-русски ok:", a)
+
+
+def test_gentle_mode():
+    dev, out, log = make()
+    out.rate = 20
+    out.set_gentle(True)
+    u = bytearray(512)
+    u[0], u[299] = 1, 2
+    out.send(u)
+    assert out.dev.chunk == 32 and all(len(d) <= 32 for _, d in dev.transfers)
+    n = len(dev.transfers)
+    sent = 0
+    for i in range(20):                 # 1 секунда по 50 мс, меняем канал каждый кадр
+        u[0] = i + 2
+        before = len(dev.transfers)
+        out.send(u)
+        sent += len(dev.transfers) > before
+        CLOCK.tick(0.05)
+    assert sent <= 11, sent             # не чаще 10 раз/с
+    out.set_gentle(False)
+    assert out.dev.chunk == 128
+    assert "бережный режим" in log.read_text("utf-8")
+    print("бережный режим ok:", sent, "посылок/с")
+
+
 def test_rate_limit_and_driver_hint():
     dev, out, _ = make()
     out.rate = 20
@@ -268,4 +322,6 @@ if __name__ == "__main__":
     test_unplug_and_plug_back()
     test_long_failure_reconnects()
     test_rate_limit_and_driver_hint()
+    test_readable_libusb0_errors()
+    test_gentle_mode()
     print("ВСЕ ТЕСТЫ ВЫВОДА ПРОЙДЕНЫ")

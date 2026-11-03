@@ -122,6 +122,12 @@ class UdmxTab(QWidget):
         self.rate.setToolTip("Как часто слать изменения на uDMX. Если связь рвётся — уменьшите до 10–15.")
         self.rate.valueChanged.connect(lambda v: setattr(output, "rate", v))
         f.addRow("Частота отправки:", self.rate)
+        self.gentle = QCheckBox("Бережный режим (для клонов, которые зависают и отключаются)")
+        self.gentle.setChecked(bool(settings.udmx_gentle))
+        self.gentle.setToolTip("Не чаще 10 раз в секунду, маленькими посылками по 32 канала с паузами.\n"
+                               "Фейды станут чуть менее плавными, зато слабой прошивке легче.")
+        self.gentle.toggled.connect(output.set_gentle)
+        f.addRow(self.gentle)
         row = QHBoxLayout()
         b_re = QPushButton("Переподключить")
         b_re.clicked.connect(output.reconnect)
@@ -202,5 +208,5 @@ class SettingsDialog(QDialog):
         changed = (ip, port) != (s.daw_ip, int(s.daw_port))
         s.set(daw_ip=ip, daw_port=port, daw_name=self.daw.name if ip else "",
               auto_connect=self.daw.auto.isChecked(), update_auto=self.update_auto.isChecked(),
-              udmx_rate=self.udmx.rate.value())
+              udmx_rate=self.udmx.rate.value(), udmx_gentle=self.udmx.gentle.isChecked())
         return changed

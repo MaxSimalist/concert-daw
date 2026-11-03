@@ -28,6 +28,7 @@ class Settings:
         "auto_connect": True,
         "udmx_enabled": True,
         "udmx_rate": 20,
+        "udmx_gentle": False,
     }
 
     def __init__(self, path: Path = None):
