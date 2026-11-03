@@ -374,6 +374,7 @@ class AppConfig:
     norm_on: bool = False
     norm_target: float = -16.0   # LUFS
     norm_max_boost: float = 6.0  # dB: тихие треки поднимаются не больше чем на столько
+    title_source: str = "file"   # название нового трека: "file" — имя файла, "tags" — тег «Название»
     # ── пульт X32 по сети (OSC) ──
     osc_on: bool = False
     osc_ip: str = ""
@@ -417,10 +418,22 @@ class AppConfig:
 # ──────────────────────────────────────────────────────────────────────────────
 # Разбор перетащенных путей
 # ──────────────────────────────────────────────────────────────────────────────
-def audio_title(path: str | Path) -> str:
-    """Название трека: тег «Название» (MP3 ID3, WAV/FLAC INFO), иначе имя файла
-    без номера в начале («01 - Кукушка.mp3» → «Кукушка»)."""
+TITLE_SOURCE = {"value": "file"}   # задаётся из настроек (AppConfig.title_source)
+
+
+def file_title(path: str | Path) -> str:
+    """Название трека по имени файла — как есть, без расширения («Кукушка (минус).mp3» → «Кукушка (минус)»)."""
     p = Path(path)
+    return p.stem.strip() or p.name
+
+
+def audio_title(path: str | Path, source: str = "") -> str:
+    """Название нового трека. По умолчанию — имя файла без расширения.
+    source="tags" (настройка): тег «Название» (MP3 ID3, WAV/FLAC INFO), а если его нет —
+    имя файла без номера в начале («01 - Кукушка.mp3» → «Кукушка»)."""
+    p = Path(path)
+    if (source or TITLE_SOURCE["value"]) != "tags":
+        return file_title(p)
     try:  # mutagen (опционально) читает ID3-теги MP3 и любые другие
         import mutagen
         f = mutagen.File(str(p), easy=True)

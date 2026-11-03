@@ -62,6 +62,7 @@ class SettingsResult:
     norm_on: bool
     norm_target: float
     norm_max_boost: float
+    title_source: str = "file"
     osc_on: bool
     osc_ip: str
     osc_when: str
@@ -303,6 +304,13 @@ class SettingsDialog(QDialog):
         self.switch_combo.setCurrentIndex(max(0, self.switch_combo.findData(self.cfg.switch_while_playing)))
         form.addRow("Выбор другого трека во время игры:", self.switch_combo)
         form.addRow("", QLabel("Действие в конце конкретного трека задаётся в «Редакторе трека»."))
+        self.title_combo = QComboBox()
+        self.title_combo.addItem("из имени файла", "file")
+        self.title_combo.addItem("из тегов файла (MP3 ID3 «Название»), иначе имя файла", "tags")
+        self.title_combo.setCurrentIndex(max(0, self.title_combo.findData(self.cfg.title_source)))
+        self.title_combo.setToolTip("Для новых треков. Уже добавленные: правый клик по треку → "
+                                    "«Название из имени файла»")
+        form.addRow("Название нового трека:", self.title_combo)
         self.confirm_cb = QCheckBox("Спрашивать подтверждение при удалении треков и плейлистов")
         self.confirm_cb.setChecked(self.cfg.confirm_delete)
         form.addRow(self.confirm_cb)
@@ -683,6 +691,7 @@ class SettingsDialog(QDialog):
             norm_on=self.norm_cb.isChecked(),
             norm_target=float(self.norm_target.value()),
             norm_max_boost=float(self.norm_boost.value()),
+            title_source=self.title_combo.currentData() or "file",
             osc_on=True,
             osc_ip=self.osc_ip.text().strip(),
             osc_when=str(self.osc_when.currentData()),

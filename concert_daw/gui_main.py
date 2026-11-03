@@ -39,8 +39,8 @@ from gui_rec_channels import RecChannelsDialog, summary_text
 from gui_update import UpdateButton
 from gui_song_editor import SongEditorDialog
 from gui_widgets import TrackStrip, no_focus
-from model import (ConfigStore, Playlist, Song, TrackConfig, is_audio_file, songs_from_files,
-                   songs_from_paths)
+from model import (TITLE_SOURCE, ConfigStore, Playlist, Song, TrackConfig, file_title, is_audio_file,
+                   songs_from_files, songs_from_paths)
 from style import ACCENT, ORANGE, TEXT, repolish
 
 ROLE_ID = Qt.UserRole
@@ -336,6 +336,7 @@ class MainWindow(QMainWindow):
 
         self.store = store or ConfigStore()
         self.cfg = self.store.load()
+        TITLE_SOURCE["value"] = self.cfg.title_source     # откуда брать название нового трека
         self.engine = AudioEngine()
         self.engine.samplerate = self.cfg.samplerate
         self.engine.blocksize = self.cfg.blocksize
@@ -842,6 +843,8 @@ class MainWindow(QMainWindow):
         c.metro_output, c.metro_volume_db, c.metro_accent = r.metro_output, r.metro_volume_db, r.metro_accent
         c.metro_beats, c.countin_bars = r.metro_beats, r.countin_bars
         c.norm_on, c.norm_target, c.norm_max_boost = r.norm_on, r.norm_target, r.norm_max_boost
+        c.title_source = r.title_source
+        TITLE_SOURCE["value"] = c.title_source
         c.osc_on, c.osc_ip, c.osc_when, c.osc_faders = r.osc_on, r.osc_ip, r.osc_when, r.osc_faders
         c.fx_tempo, c.silence_offer = r.fx_tempo, r.silence_offer
         c.fx_auto, c.fx_auto_div = r.fx_auto, r.fx_auto_div
@@ -1145,6 +1148,13 @@ class MainWindow(QMainWindow):
         a_load = m.addAction("Загрузить (встать на начало, не запуская)")
         a_edit = m.addAction("Редактор трека (темп, тон, обрезка)…")
         a_rename = m.addAction("Переименовать…")
+        a_fname = None
+        if len(song.tracks) == 1 and file_title(song.tracks[0].file) != song.name:
+            a_fname = m.addAction(f"Название из имени файла: «{file_title(song.tracks[0].file)}»")
+        pl_here = self._locate(song.id)
+        a_fname_all = m.addAction("Названия всех треков плейлиста — из имён файлов") \
+            if pl_here and any(len(s.tracks) == 1 and file_title(s.tracks[0].file) != s.name
+                               for s in pl_here[0].songs) else None
         km = m.addMenu(f"Тональность: {song.key or 'не определена'}")
         a_detect = km.addAction("Определить заново")
         a_setkey = km.addAction("Указать вручную…")
@@ -1188,6 +1198,15 @@ class MainWindow(QMainWindow):
                     self.song_label.setText(song.name)
                 self._update_next_label()
                 self._schedule_save()
+        elif a_fname is not None and chosen is a_fname:
+            self._rename_song(song, file_title(song.tracks[0].file))
+        elif a_fname_all is not None and chosen is a_fname_all:
+            n = 0
+            for s in pl_here[0].songs:
+                if len(s.tracks) == 1 and file_title(s.tracks[0].file) != s.name:
+                    self._rename_song(s, file_title(s.tracks[0].file))
+                    n += 1
+            self._status(f"Переименовано треков: {n} (по именам файлов)")
         elif chosen is a_detect:
             song.key, song.key_manual = "", False
             self._refresh_song_items()
@@ -1287,6 +1306,14 @@ class MainWindow(QMainWindow):
                 if gone:
                     self._status(f"Файлы удалены с диска: {', '.join(gone[:3])}"
                                  + ("…" if len(gone) > 3 else ""), warn=True)
+
+    def _rename_song(self, song: Song, name: str) -> None:
+        song.name = name
+        self._refresh_song_items()
+        if song.id == self.cued_id:
+            self.song_label.setText(song.name)
+        self._update_next_label()
+        self._schedule_save()
 
     def _after_song_meta_change(self, song: Song) -> None:
         self._refresh_song_items()
