@@ -338,6 +338,26 @@ def test_fast_retry_after_loss_and_summary():
     print("быстрый поиск после потери и сводка за 10 минут ok")
 
 
+def test_libusb0_reset_reopens():
+    """libusb-win32: после сброса uDMX появляется в системе заново — переоткрываем, а не шлём в старый."""
+    dev, out, log = make()
+    u = bytearray(512)
+    u[9] = 99
+    run(out, u, 0.5)
+    out.dev.backend = "libusb0"
+    dev.stalled = True
+    u[0] = 1
+    CLOCK.tick(0.1)
+    out.send(u)                                  # ошибка -> сброс -> закрыли
+    assert out.dev is None and dev.resets == 1, (out.status, dev.resets)
+    new = FakeDev()
+    DEVICES[:] = [new]
+    run(out, u, 0.5)                             # через 0,3 с переоткрыли и переслали всё
+    assert out.connected and new.dmx[9] == 99 and out.stats["reconnects"] == 0
+    assert "переоткрываю устройство" in log.read_text("utf-8")
+    print("libusb0: сброс -> переоткрытие ok")
+
+
 def test_rate_limit_and_driver_hint():
     dev, out, _ = make()
     out.rate = 20
@@ -366,4 +386,5 @@ if __name__ == "__main__":
     test_gentle_mode()
     test_fast_recovery_from_stall()
     test_fast_retry_after_loss_and_summary()
+    test_libusb0_reset_reopens()
     print("ВСЕ ТЕСТЫ ВЫВОДА ПРОЙДЕНЫ")

@@ -236,9 +236,25 @@ class Output:
         self.stats["resets"] += 1
         try:
             self.dev.reset()
-            self.dev.invalidate(self.limit)
-            self._backoff_until = time.monotonic() + self.RESET_PAUSE
+            now = time.monotonic()
             self._fails = 0
+            if self.dev.backend == "libusb0":
+                # у libusb-win32 сброс = uDMX заново появляется в системе: старый дескриптор
+                # больше не годится («failed to open \\.\libusb0-0001…») — сразу переоткрываем
+                self._log("сброс USB-порта uDMX (прошивка не отвечает) — переоткрываю устройство")
+                try:
+                    self.dev.close()
+                except Exception:
+                    pass
+                self.dev = None
+                self.connected = False
+                self.status = "uDMX: сброс порта, переоткрываю…"
+                if self._lost_at is None:
+                    self._lost_at = now
+                self._last_try = now - self.FAST_RETRY_SEC + 0.3   # через 0,3 с — uDMX успеет появиться
+                return
+            self.dev.invalidate(self.limit)
+            self._backoff_until = now + self.RESET_PAUSE
             self._log("сброс USB-порта uDMX (прошивка не отвечает на посылки)")
         except Exception as e:
             self._log(f"сброс USB-порта не удался: {readable_error(e)}")
