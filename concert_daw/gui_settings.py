@@ -62,7 +62,6 @@ class SettingsResult:
     norm_on: bool
     norm_target: float
     norm_max_boost: float
-    title_source: str = "file"
     osc_on: bool
     osc_ip: str
     osc_when: str
@@ -76,6 +75,7 @@ class SettingsResult:
     midi_map: dict
     midi_cc_any: bool
     update_auto: bool = True
+    title_source: str = "file"
 
 
 class SettingsDialog(QDialog):
