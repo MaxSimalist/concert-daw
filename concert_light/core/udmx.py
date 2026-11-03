@@ -83,7 +83,7 @@ def fresh_usb_context():
 
 def driver_hint(backend_name):
     """Подсказка по драйверу: uDMX сделан под libusb-win32."""
-    if backend_name == "libusb0":
+    if backend_name != "libusb-1.0":   # libusb0 — нужный драйвер; «по умолчанию» — не знаем, не пугаем
         return ""
     return ("Драйвер uDMX сейчас WinUSB/libusbK. Для uDMX надёжнее родной драйвер libusb-win32: "
             "Zadig → Options → List All Devices → uDMX → libusb-win32 → Replace Driver.")

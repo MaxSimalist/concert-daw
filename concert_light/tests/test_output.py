@@ -368,7 +368,9 @@ def test_rate_limit_and_driver_hint():
         u[3] = i + 1
         out.send(u)
     assert len(dev.transfers) - n <= 1
-    assert out.hint and "libusb-win32" in out.hint          # открыто через libusb-1.0 (WinUSB)
+    from core.udmx import driver_hint
+    assert "libusb-win32" in driver_hint("libusb-1.0")       # открыто через libusb-1.0 (WinUSB)
+    assert driver_hint("libusb0") == "" and driver_hint("pyusb по умолчанию") == ""
     assert Output().rate == 20
     print("ограничение частоты и подсказка о драйвере ok")
 
