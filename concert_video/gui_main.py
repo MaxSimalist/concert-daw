@@ -41,7 +41,7 @@ from stage import Stage
 from style import repolish
 from sync_client import SyncClient, discover
 from views import ProjectorWindow, StageView, TransitionView
-from vmodel import (SOURCE_KINDS, TRANSITIONS, VIDEO_EXT, Binding, Project, ProjectStore, Scene, Source,
+from vmodel import (IMAGE_EXT, SOURCE_KINDS, TRANSITIONS, VIDEO_EXT, Binding, Project, ProjectStore, Scene, Source,
                     default_project, match_video, new_id, scene_for_video)
 
 KIND_ICONS = {"video": "video", "image": "image", "slideshow": "slides", "text": "text", "color": "color",
@@ -116,6 +116,63 @@ def _panel(title: str) -> tuple[QFrame, QVBoxLayout]:
     cap.setObjectName("caption")
     v.addWidget(cap)
     return f, v
+
+
+class DragList(QListWidget):
+    """Список, строки которого переставляются мышью (reordered), и куда можно бросить
+    файлы/папки из Проводника (files_dropped, если accept_files)."""
+    reordered = Signal()
+    files_dropped = Signal(list)
+
+    def __init__(self, accept_files: bool = False, parent=None):
+        super().__init__(parent)
+        self.accept_files = accept_files
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+
+    @staticmethod
+    def _local_paths(e) -> list:
+        md = e.mimeData()
+        if md is None or not md.hasUrls():
+            return []
+        return [u.toLocalFile() for u in md.urls() if u.isLocalFile() and u.toLocalFile()]
+
+    def dragEnterEvent(self, e) -> None:
+        if self.accept_files and self._local_paths(e):
+            e.setDropAction(Qt.CopyAction)
+            e.accept()
+            return
+        super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e) -> None:
+        if self.accept_files and self._local_paths(e):
+            e.setDropAction(Qt.CopyAction)
+            e.accept()
+            return
+        super().dragMoveEvent(e)
+
+    def dropEvent(self, e) -> None:
+        paths = self._local_paths(e) if self.accept_files else []
+        if paths:
+            e.setDropAction(Qt.CopyAction)
+            e.accept()
+            self.files_dropped.emit(paths)
+            return
+        if e.source() is not self:
+            e.ignore()
+            return
+        self.blockSignals(True)          # пока строки двигаются — без «выбора» промежуточных строк
+        try:
+            super().dropEvent(e)
+        finally:
+            self.blockSignals(False)
+        self.reordered.emit()
+
+    def ids(self) -> list:
+        return [self.item(i).data(Qt.UserRole) for i in range(self.count())]
 
 
 class MainWindow(QMainWindow):
@@ -419,7 +476,10 @@ class MainWindow(QMainWindow):
 
     def _build_scenes(self) -> QWidget:
         f, v = _panel("СЦЕНЫ")
-        self.scene_list = QListWidget()
+        self.scene_list = DragList()
+        self.scene_list.setToolTip("Сцены можно переставлять мышью. Двойной клик — в эфир")
+        self.scene_list.reordered.connect(self._scenes_reordered)
+        self.scene_list.itemClicked.connect(self._on_scene_clicked)
         self.scene_list.currentRowChanged.connect(self._on_scene_row)
         self.scene_list.itemDoubleClicked.connect(lambda _i: self.take(self.sel_scene))
         self.scene_list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -439,7 +499,9 @@ class MainWindow(QMainWindow):
 
     def _build_sources(self) -> QWidget:
         f, v = _panel("ИСТОЧНИКИ")
-        self.source_list = QListWidget()
+        self.source_list = DragList(accept_files=True)
+        self.source_list.reordered.connect(self._sources_reordered)
+        self.source_list.files_dropped.connect(self.add_dropped_files)
         self.source_list.currentRowChanged.connect(self._on_source_row)
         self.source_list.itemChanged.connect(self._on_source_item_changed)
         self.source_list.itemDoubleClicked.connect(lambda _i: self.edit_source())
@@ -679,11 +741,21 @@ class MainWindow(QMainWindow):
         self.standby_combo.blockSignals(False)
 
     def _on_scene_row(self, row: int) -> None:
-        if 0 <= row < len(self.project.scenes):
-            sid = self.project.scenes[row].id
-            self.select_scene(sid)
-            if not self.project.studio_mode:
-                self.take(sid)
+        it = self.scene_list.item(row) if row >= 0 else None
+        sid = it.data(Qt.UserRole) if it is not None else ""
+        if not sid or self.project.scene(sid) is None:
+            return
+        self.select_scene(sid)
+        if not self.project.studio_mode:
+            if QApplication.mouseButtons() & Qt.LeftButton:
+                return        # мышь ещё нажата — может, сцену тащат; в эфир — по отпусканию (клик)
+            self.take(sid)    # стрелки клавиатуры — сразу
+
+    def _on_scene_clicked(self, it: QListWidgetItem) -> None:
+        """Обычный клик (без перетаскивания) — в обычном режиме сцена сразу в эфир."""
+        sid = it.data(Qt.UserRole)
+        if not self.project.studio_mode and sid and sid != self.stage.program_id:
+            self.take(sid)
 
     def _apply_studio_layout(self) -> None:
         """Как в OBS: студийный режим — ПРЕВЬЮ слева + ЭФИР справа и кнопка «В эфир»;
@@ -838,6 +910,16 @@ class MainWindow(QMainWindow):
             self.refresh_scenes()
             self.schedule_save()
 
+    def _scenes_reordered(self) -> None:
+        """Сцены переставили мышью: новый порядок (и горячие клавиши F1…F12) — как в списке."""
+        by_id = {sc.id: sc for sc in self.project.scenes}
+        order = [by_id[i] for i in self.scene_list.ids() if i in by_id]
+        order += [sc for sc in self.project.scenes if sc not in order]      # на всякий случай
+        if order != self.project.scenes:
+            self.project.scenes[:] = order
+            self.schedule_save()
+        self.refresh_scenes()
+
     def _set_standby(self, sid: str) -> None:
         self.project.standby_scene = sid
         self.refresh_scenes()
@@ -880,7 +962,8 @@ class MainWindow(QMainWindow):
                 it.setData(Qt.UserRole, src.id)
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
                 it.setCheckState(Qt.Checked if src.visible else Qt.Unchecked)
-                it.setToolTip("Галочка — показать/скрыть. Двойной клик — свойства")
+                it.setToolTip("Галочка — показать/скрыть. Двойной клик — свойства. "
+                              "Мышью — поменять слои местами. Сюда можно перетащить файлы из папки")
                 self.source_list.addItem(it)
                 if src.id == keep:
                     self.source_list.setCurrentItem(it)
@@ -1014,6 +1097,69 @@ class MainWindow(QMainWindow):
             self.stage.restack(sc.id)
             self.refresh_sources(select=src.id)
             self.schedule_save()
+
+    def _sources_reordered(self) -> None:
+        """Источники переставили мышью: сверху списка — верхний слой."""
+        sc = self._scene()
+        if sc is None:
+            return
+        keep = self._current_source_id()
+        by_id = {s.id: s for s in sc.sources}
+        top_first = [by_id[i] for i in self.source_list.ids() if i in by_id]
+        order = list(reversed(top_first)) + [s for s in sc.sources if s not in top_first]
+        if order != sc.sources:
+            sc.sources[:] = order
+            self.stage.restack(sc.id)
+            self.schedule_save()
+        self.refresh_sources(select=keep)
+
+    def add_dropped_files(self, paths: list) -> None:
+        """Файлы/папки, брошенные из Проводника в «Источники»: видео и картинки — источники,
+        папка с картинками — слайд-шоу, папка с видео — все видео из неё."""
+        sc = self._scene()
+        if sc is None:
+            self.status("Сначала создайте или выберите сцену", warn=True)
+            return
+        cw, ch = self.project.canvas_w, self.project.canvas_h
+        added, skipped = [], []
+
+        def add(kind: str, name: str, params: dict) -> None:
+            src = Source(kind, name, w=cw, h=ch)
+            src.params = params
+            if kind == "video":
+                src.muted = False                  # звук видео — фейдером сцены
+            sc.sources.append(src)
+            self.stage.add_source(sc.id, src)
+            added.append(src)
+
+        for raw in paths:
+            p = Path(raw)
+            ext = p.suffix.lower()
+            if p.is_dir():
+                files = sorted(x for x in p.iterdir() if x.is_file())
+                images = [x for x in files if x.suffix.lower() in IMAGE_EXT]
+                videos = [x for x in files if x.suffix.lower() in VIDEO_EXT]
+                if images:
+                    add("slideshow", p.name, {"folder": str(p), "interval": 5.0})
+                for x in videos:
+                    add("video", x.stem, {"file": str(x)})
+                if not images and not videos:
+                    skipped.append(p.name)
+            elif ext in VIDEO_EXT:
+                add("video", p.stem, {"file": str(p)})
+            elif ext in IMAGE_EXT:
+                add("image", p.stem, {"file": str(p)})
+            else:
+                skipped.append(p.name)
+        if added:
+            self.refresh_sources(select=added[-1].id)
+            self.edit_view.select_source(added[-1].id)
+            self.refresh_mixer()
+            self.schedule_save()
+        msg = f"Добавлено источников: {len(added)}" if added else "Ничего не добавлено"
+        if skipped:
+            msg += f"; пропущено (не видео и не картинки): {', '.join(skipped[:3])}" + ("…" if len(skipped) > 3 else "")
+        self.status(msg, warn=bool(skipped) or not added)
 
     def _source_menu(self, sid: str, gpos) -> None:
         src = self._source(sid)
