@@ -61,11 +61,14 @@ class Output:
     GENTLE_RATE = 10         # бережный режим: не чаще 10 раз в секунду,
     GENTLE_CHUNK = 32        # кусками по 32 канала
     GENTLE_GAP = 0.003       # с паузой 3 мс между кусками
+    AUTO_GENTLE_RESETS = 2   # столько сбросов порта за минуту — бережный режим включается сам
 
     def __init__(self, enabled=True, rate=20, log_path=None, gentle=False):
         self.enabled = enabled
         self.rate = rate
         self.gentle = gentle
+        self.auto_gentle = False      # бережный режим включён программой сама (uDMX начал сбоить)
+        self._reset_times = []
         self.log_path = log_path
         self.dev = None
         self.status = "Нет устройства"
@@ -159,7 +162,11 @@ class Output:
         self._last_try = 0.0                          # пробуем сразу, без паузы
 
     def set_gentle(self, on):
-        self.gentle = bool(on)
+        on = bool(on)
+        if on != self.gentle:
+            self._log(f"бережный режим {'включён' if on else 'выключен'} вручную")
+        self.gentle = on
+        self.auto_gentle = False
         self._apply_gentle()
 
     def _apply_gentle(self):
@@ -202,7 +209,9 @@ class Output:
             self._pipe = 0
             if not self.connected:
                 self.connected = True
-            self.status = f"uDMX подключён ({self.dev.backend})"
+            self.status = f"uDMX подключён ({self.dev.backend})" + (
+                ", бережный режим включён автоматически" if self.auto_gentle else
+                ", бережный режим" if self.gentle else "")
         except Exception as e:
             self._fails += 1
             self.stats["errors"] += 1
@@ -226,8 +235,15 @@ class Output:
         try:
             self.dev.reset()
             self.dev.invalidate(self.limit)
-            self._backoff_until = time.monotonic() + 0.5   # даём uDMX переинициализироваться
+            now = time.monotonic()
+            self._backoff_until = now + 0.5               # даём uDMX переинициализироваться
             self._log("сброс USB-порта uDMX (прошивка не отвечает на посылки)")
+            self._reset_times = [t for t in self._reset_times if now - t < 60] + [now]
+            if not self.gentle and len(self._reset_times) >= self.AUTO_GENTLE_RESETS:
+                self.gentle = self.auto_gentle = True
+                self._apply_gentle()
+                self._log(f"uDMX сбоит ({len(self._reset_times)} сброса за минуту) — "
+                          "бережный режим включён автоматически")
         except Exception as e:
             self._log(f"сброс USB-порта не удался: {readable_error(e)}")
             self._drop(f"сброс не удался: {readable_error(e)}")

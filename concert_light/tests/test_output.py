@@ -298,6 +298,23 @@ def test_gentle_mode():
     print("бережный режим ok:", sent, "посылок/с")
 
 
+def test_auto_gentle_when_flaky():
+    """Как в журнале 0.9.6: после первого зависания прошивка виснет каждые несколько секунд."""
+    dev, out, log = make()
+    u = bytearray(512)
+    run(out, u, 1, change=0)
+    assert not out.gentle
+    for _ in range(2):
+        dev.stalled = True
+        run(out, u, 2, change=0)
+    assert out.gentle and out.auto_gentle and out.dev.chunk == 32, out.status
+    assert "бережный режим включён автоматически" in log.read_text("utf-8")
+    assert out.connected and out.stats["reconnects"] == 0
+    out.set_gentle(False)                        # человек выключил сам — его решение главнее
+    assert not out.gentle and not out.auto_gentle
+    print("бережный режим сам при сбоях ok:", out.stats["resets"], "сброса")
+
+
 def test_rate_limit_and_driver_hint():
     dev, out, _ = make()
     out.rate = 20
@@ -324,4 +341,5 @@ if __name__ == "__main__":
     test_rate_limit_and_driver_hint()
     test_readable_libusb0_errors()
     test_gentle_mode()
+    test_auto_gentle_when_flaky()
     print("ВСЕ ТЕСТЫ ВЫВОДА ПРОЙДЕНЫ")

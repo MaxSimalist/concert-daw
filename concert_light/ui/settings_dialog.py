@@ -161,6 +161,10 @@ class UdmxTab(QWidget):
 
     def _show(self):
         o = self.output
+        if self.gentle.isChecked() != o.gentle:          # программа могла включить сама
+            self.gentle.blockSignals(True)
+            self.gentle.setChecked(o.gentle)
+            self.gentle.blockSignals(False)
         color = "#3c3" if o.connected else "#e44"
         self.state.setText(f"<span style='color:{color}'>●</span> {o.status}")
         st = o.stats
