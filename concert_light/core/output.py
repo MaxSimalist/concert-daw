@@ -165,11 +165,21 @@ class Output:
         self.status = f"Связь с uDMX потеряна: {reason} — переподключаюсь…"
         self._last_try = 0.0                          # пробуем сразу, без паузы
 
+    RATE_LOG_DELAY = 2.0     # частота пишется в журнал, когда её перестали крутить
+
     def set_rate(self, rate):
         rate = int(rate)
         if rate != self.rate:
-            self._log(f"частота отправки: {rate} раз/с")
+            self._rate_pending = (rate, time.monotonic())
         self.rate = rate
+
+    def _log_rate_if_settled(self, now):
+        pending = getattr(self, "_rate_pending", None)
+        if pending and now - pending[1] >= self.RATE_LOG_DELAY:
+            self._rate_pending = None
+            if pending[0] != getattr(self, "_rate_logged", None):
+                self._rate_logged = pending[0]
+                self._log(f"частота отправки: {pending[0]} раз/с")
 
     def set_gentle(self, on):
         on = bool(on)
@@ -195,6 +205,7 @@ class Output:
     def send(self, universe):
         now = time.monotonic()
         self._summary(now)
+        self._log_rate_if_settled(now)
         if self.dev is None:
             fast = self._lost_at is not None and now - self._lost_at < self.FAST_RETRY_WINDOW
             if now - self._last_try >= (self.FAST_RETRY_SEC if fast else self.RETRY_SEC):

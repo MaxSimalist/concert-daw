@@ -293,8 +293,14 @@ def test_gentle_mode():
         CLOCK.tick(0.05)
     assert sent <= 5, sent              # не чаще 5 раз/с
     out.set_gentle(False)
+    for r in range(21, 45):             # крутят поле частоты: 21, 22 … 44 — в журнал одна строка
+        out.set_rate(r)
+        CLOCK.tick(0.1)
+    CLOCK.tick(Output.RATE_LOG_DELAY)
+    out.send(u)
     text = log.read_text("utf-8")
-    assert "бережный режим включён вручную" in text and "частота отправки: 20" in text
+    assert "бережный режим включён вручную" in text and "частота отправки: 44" in text
+    assert text.count("частота отправки") == 1, text
     print("бережный режим ok:", sent, "посылок/с")
 
 
