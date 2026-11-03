@@ -557,7 +557,11 @@ class FxTempo:
     1. Запрашивает тип эффекта в слоте (/fx/N/type).
     2. Если это задержка с известным параметром времени — отправляет время.
     3. Проверяет: запрашивает /node fx/N/par — пульт отвечает значениями в мс.
-       Не совпало — пробует другую шкалу (линейная/логарифмическая) и запоминает рабочую.
+       Проверяется только ответ на ПОСЛЕДНЮЮ отправку (раньше запоздавший ответ на прошлую
+       отправку мог «подтвердить» значение, которое уже было перезаписано, — галочка ✔ стояла,
+       а на пульте было другое время).
+       Другая шкала (линейная/логарифмическая) пробуется, только если показание пульта точно
+       объясняется ею; иначе время отправляется ещё раз.
     Всё асинхронно: ответы пульта приходят через handle() из основного цикла программы."""
 
     def __init__(self, osc: X32Osc, scale: str = "lin") -> None:
@@ -567,6 +571,9 @@ class FxTempo:
         self._target: dict[int, float] = {}       # слот → нужное время, мс
         self._tried: dict[int, set] = {}
         self._sent_scale: dict[int, str] = {}     # слот → какой шкалой отправлено последнее значение
+        self._sent_f: dict[int, float] = {}       # слот → какое число (0…1) отправлено последним
+        self._pending: dict[int, int] = {}        # слот → сколько запросов /node ещё без ответа
+        self._resent: dict[int, int] = {}         # слот → сколько раз переотправляли той же шкалой
         self.reports: list[str] = []              # сообщения для строки состояния
         self.scale_changed = False
 
@@ -585,6 +592,7 @@ class FxTempo:
                 continue
             self._target[n] = delay_ms(bpm, division)
             self._tried[n] = set()
+            self._resent[n] = 0
             self.osc.send(f"/fx/{n}/type")         # ответ → handle → отправка времени
 
     def handle(self, address: str, args: list) -> None:
@@ -615,7 +623,10 @@ class FxTempo:
         scale = scale or self.scale
         self._tried.setdefault(n, set()).add(scale)
         self._sent_scale[n] = scale
-        self.osc.send(f"/fx/{n}/par/{par:02d}", float(time_to_float(ms, lo, hi, scale)))
+        f = float(time_to_float(ms, lo, hi, scale))
+        self._sent_f[n] = f
+        self.osc.send(f"/fx/{n}/par/{par:02d}", f)
+        self._pending[n] = self._pending.get(n, 0) + 1
         self.osc.send("/node", f"fx/{n}/par")       # проверка: пульт вернёт значения в мс
 
     def _verify(self, text: str) -> None:
@@ -624,6 +635,10 @@ class FxTempo:
         if not m:
             return
         n = int(m.group(1))
+        if self._pending.get(n, 0) > 0:
+            self._pending[n] -= 1
+        if self._pending.get(n, 0) > 0:
+            return            # это ответ на одну из прошлых отправок — ждём ответ на последнюю
         ms = self._target.get(n)
         code = FX_TYPES[self.types[n]] if 0 <= self.types.get(n, -1) < len(FX_TYPES) else "?"
         if ms is None or code not in TEMPO_FX:
@@ -644,11 +659,17 @@ class FxTempo:
             return
         sent = self._sent_scale.get(n, self.scale)
         other = "log" if sent == "lin" else "lin"
-        if other not in self._tried.get(n, set()):
+        # пульт понял отправленное число по другой шкале? (показание точно совпадает с расчётом)
+        as_other = float_to_time(self._sent_f.get(n, -1.0), lo, hi, other)
+        explained = abs(got - as_other) <= max(2.0, as_other * 0.02)
+        if explained and other not in self._tried.get(n, set()):
             if self.scale != other:
                 self.scale = other                   # пульт кодирует время по другой шкале
                 self.scale_changed = True
             self._send_time(n, other)
+        elif self._resent.get(n, 0) < 2:
+            self._resent[n] = self._resent.get(n, 0) + 1
+            self._send_time(n, sent)                 # не дошло/перебили — отправить ещё раз
         else:
             self._target.pop(n, None)
             self.reports.append(f"FX{n}: пульт показывает {got:.0f} мс вместо {expected:.0f} — "

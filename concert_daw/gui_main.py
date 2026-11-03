@@ -372,7 +372,9 @@ class MainWindow(QMainWindow):
         self.key_signals.done.connect(self._on_key_detected)
         self._key_busy = False
         self.osc = X32Osc()                         # пульт по сети
-        self.fx_tempo = FxTempo(self.osc, self.cfg.fx_time_scale)
+        # X32 кодирует время задержки линейно. Сохранённую раньше «log» не берём: она могла
+        # запомниться по ошибке (запоздавший ответ пульта) — шкала уточнится сама, если нужно.
+        self.fx_tempo = FxTempo(self.osc, "lin")
         self.midi = MidiController()                # педаль / контроллер
 
         self._save_timer = QTimer(self)
