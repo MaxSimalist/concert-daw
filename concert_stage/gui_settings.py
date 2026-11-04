@@ -55,6 +55,12 @@ class SettingsDialog(QDialog):
         self.scale.setValue(self.s.font_scale)
         self.scale.setSuffix(" ×")
         f.addRow("Размер надписей:", self.scale)
+        self.orient = QComboBox()
+        for key, text in (("auto", "сам по экрану (вертикальный монитор — вертикальное табло)"),
+                          ("landscape", "горизонтальное"), ("portrait", "вертикальное (монитор повёрнут)")):
+            self.orient.addItem(text, key)
+        self.orient.setCurrentIndex(max(0, self.orient.findData(self.s.orientation)))
+        f.addRow("Расположение:", self.orient)
         self.screen = QComboBox()
         self.screen.addItem("где открыто окно", -1)
         for i, sc in enumerate(QGuiApplication.screens()):
@@ -200,6 +206,7 @@ class SettingsDialog(QDialog):
         s.alert_seconds = self.alert.value()
         s.warn_seconds = max(self.warn.value(), s.alert_seconds)
         s.font_scale = float(self.scale.value())
+        s.orientation = str(self.orient.currentData() or "auto")
         s.screen = int(self.screen.currentData())
         s.start_fullscreen = self.start_full.isChecked()
         new_ip = self.daw_ip.text().strip()

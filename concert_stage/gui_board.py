@@ -238,6 +238,7 @@ class ChannelsPanel(QWidget):
         self.keys: list[str] = []
         self.px = 16.0
         self._cols = 0
+        self.max_rows = 2                          # на вертикальном экране — до 4 рядов
 
     def set_keys(self, keys: list) -> None:
         if list(keys) == self.keys:
@@ -257,9 +258,9 @@ class ChannelsPanel(QWidget):
         tile_w = max(110.0, self.px * 9)
         cols = max(1, min(n, int(max(1, self.width()) // tile_w)))
         rows = -(-n // cols)
-        if rows > 2:                               # не больше двух рядов: плитки становятся уже
-            rows = 2
-            cols = -(-n // 2)
+        if rows > self.max_rows:                   # рядов не больше max_rows: плитки становятся уже
+            rows = self.max_rows
+            cols = -(-n // rows)
         if cols == self._cols:
             return
         self._cols = cols

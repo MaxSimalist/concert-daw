@@ -364,6 +364,7 @@ class MainWindow(QMainWindow):
         self._switch_to: Optional[str] = None     # песня, на которую переключаемся на ходу
         self._switch_force_play = False           # переключение двойным кликом — всегда играть
         self._pending_attach = ""                # запись, которую добавить в трек после STOP
+        self._pending_reload_id = ""             # трек правили во время игры — пересобрать после остановки
         self._paused_id: Optional[str] = None   # трек, поставленный на PAUSE (продолжить без отсчёта)
         self._rewind_after_stop = False           # STOP: после затухания вернуться в начало
         self.recorder = Recorder()
@@ -1032,6 +1033,8 @@ class MainWindow(QMainWindow):
             if song.duration:
                 right.append(fmt_time(song.output_duration))
             mark = "✎" if not song.edit.is_identity else ""
+            if sid == self._pending_reload_id:
+                mark = "⏳ правка после стопа"
             end = {"next": "→", "stop": "■"}.get(song.end_action, "")
             right += [x for x in (mark, end) if x]
             missing = song.missing_files
@@ -1458,12 +1461,43 @@ class MainWindow(QMainWindow):
             return
         self._edit_song(song)
 
+    @staticmethod
+    def _audio_signature(song: Song) -> tuple:
+        """Всё, что меняет сам звук трека (нужно пересчитать): обрезка, фейды, темп, тон."""
+        e = song.edit
+        return (e.start, e.end, e.speed, e.pitch, e.fade_in, e.fade_out,
+                tuple(bool(t.transpose) for t in song.tracks))
+
     def _edit_song(self, song: Song) -> None:
-        if self.engine.is_playing and song.id == self.cued_id:
-            self._status("Остановите воспроизведение, чтобы редактировать этот трек", warn=True)
-            return
+        """Редактор трека открывается всегда — и во время игры. Название, тональность, темп,
+        «в конце трека», сцена пульта применяются сразу; если поменяли сам звук (тон, темп,
+        обрезку, фейды) у играющего трека — он доигрывается как есть, а новый вариант
+        считается в фоне и встаёт после остановки (концерт не прерывается)."""
+        before = self._audio_signature(song)
+        live = self.engine.is_playing and self.engine.song is not None and self.engine.song.song.id == song.id
         dlg = SongEditorDialog(song, self.engine.samplerate, self._add_exported_song, self)
+        if live:
+            dlg.setWindowTitle(dlg.windowTitle() + "  —  ИГРАЕТ: тон, темп и обрезка применятся после остановки")
         if dlg.exec():
+            loaded = self.cache.get(song.id)
+            if self._audio_signature(song) == before:
+                if loaded is not None:
+                    self._apply_norm(loaded)              # «не выравнивать громкость» — сразу
+                self._after_song_meta_change(song)
+                if song.id == self.cued_id:
+                    self.song_label.setText(song.name)
+                self._update_next_label()
+                return
+            live = live or (self.engine.is_playing and self.engine.song is not None
+                            and self.engine.song.song.id == song.id)
+            if live or (self._is_paused() and song.id == self.cued_id):
+                self._pending_reload_id = song.id
+                audio_edit.prerender_song(song, self.engine.samplerate)   # считаем заранее, в фоне
+                self._refresh_song_items()
+                self._schedule_save()
+                self._status("Тон/темп/обрезка изменятся после остановки трека — сейчас доигрывается "
+                             "прежний вариант. Новый уже считается в фоне")
+                return
             self.cache.pop(song.id, None)
             if song.id == self.cued_id:
                 self._reload_cued()
@@ -2016,6 +2050,16 @@ class MainWindow(QMainWindow):
                 self.progress.setValue(int(1000 * min(1.0, pos / song.duration)))
             self.remain_label.setText("-" + fmt_time(song.duration - pos))
         playing = eng.is_playing
+        pid = self._pending_reload_id
+        if pid:
+            cur = eng.song.song.id if eng.song is not None else ""
+            if not (playing and cur == pid) and not (self._is_paused() and self.cued_id == pid):
+                self._pending_reload_id = ""            # трек больше не звучит — ставим новый вариант
+                if cur == pid and not playing:
+                    self._reload_cued()
+                else:
+                    self.cache.pop(pid, None)
+                self._status("Изменения трека применены")
         if self._pending_attach and not playing:
             folder, self._pending_attach = self._pending_attach, ""
             self._attach_recording(folder)
@@ -2637,8 +2681,15 @@ class MainWindow(QMainWindow):
         if not lead and not trail:
             self._status("Обрезать нечего: тишины в начале/конце нет (или трек уже обрезан)")
             return
-        if self.engine.is_playing and song.id == self.cued_id:
-            self._status("Остановите воспроизведение, чтобы обрезать этот трек", warn=True)
+        eng = self.engine
+        if eng.is_playing and eng.song is not None and eng.song.song.id == song.id:
+            song.trim_silence(lead, trail)               # играет — доигрываем, обрезка встанет после стопа
+            self._pending_reload_id = song.id
+            audio_edit.prerender_song(song, eng.samplerate)
+            self.trim_banner.hide()
+            self._refresh_song_items()
+            self._schedule_save()
+            self._status("Тишина будет обрезана после остановки трека — сейчас доигрывается как есть")
             return
         song.trim_silence(lead, trail)
         self.cache.pop(song.id, None)

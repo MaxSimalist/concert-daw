@@ -49,6 +49,7 @@ class StageSettings:
     warn_seconds: int = 30           # жёлтым «осталось» — когда меньше стольких секунд
     alert_seconds: int = 10          # красным и мигает
     font_scale: float = 1.0
+    orientation: str = "auto"        # "auto" (по экрану) / "landscape" / "portrait" (вертикальный монитор)
     start_fullscreen: bool = False
     screen: int = -1                 # на каком экране на весь экран (-1 — где окно)
     # обновления
@@ -78,6 +79,8 @@ class StageSettings:
                 continue
             setattr(s, k, v)
         s.font_scale = min(3.0, max(0.5, s.font_scale))
+        if s.orientation not in ("auto", "landscape", "portrait"):
+            s.orientation = "auto"
         s.alert_seconds = max(0, s.alert_seconds)
         s.warn_seconds = max(s.alert_seconds, s.warn_seconds)
         return s

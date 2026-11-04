@@ -18,7 +18,7 @@ from typing import Optional
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtGui import QCursor, QGuiApplication, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton, QSizePolicy,
+from PySide6.QtWidgets import (QApplication, QBoxLayout, QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
 
 import sync_client
@@ -138,21 +138,33 @@ class MainWindow(QMainWindow):
         self.gear.setToolTip("Настройки (F2). F11 — на весь экран")
         self.gear.setFocusPolicy(Qt.NoFocus)
         self.gear.clicked.connect(self.open_settings)
+        # секундомер — отдельным блоком: на горизонтальном экране он в верхней строке,
+        # на вертикальном — своей крупной строкой под ней
+        self.timer_w = QWidget()
+        tl = QHBoxLayout(self.timer_w)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(10)
+        self.timer_layout = tl
+        tl.addWidget(self.timer_caption)
+        tl.addWidget(self.show_label)
         top.addWidget(self.state_label)
         top.addSpacing(14)
         top.addWidget(self.playlist_label, 1)
-        top.addWidget(self.timer_caption)
-        top.addWidget(self.show_label)
+        top.addWidget(self.timer_w)
         top.addSpacing(24)
         top.addWidget(self.clock_label)
         top.addSpacing(16)
         top.addWidget(self.link_label)
         top.addWidget(self.gear)
+        self.top_layout = top
+        self.outer = outer
         outer.addLayout(top)
+        self.portrait = False
 
         # ── середина ────────────────────────────────────────────────────────
-        mid = QHBoxLayout()
+        mid = QBoxLayout(QBoxLayout.LeftToRight)
         mid.setSpacing(24)
+        self.mid_layout = mid
         left = QVBoxLayout()
         left.setSpacing(6)
         self.now_caption = _label("caption")
@@ -161,7 +173,8 @@ class MainWindow(QMainWindow):
         self.song_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.marker_label = _label("marker")
         self.progress = ProgressStrip()
-        times = QHBoxLayout()
+        times = QBoxLayout(QBoxLayout.LeftToRight)
+        self.times_layout = times
         self.elapsed_label = _label("elapsed", Qt.AlignLeft | Qt.AlignBottom)
         self.remain_label = _label("remain", Qt.AlignRight | Qt.AlignBottom)
         self.remain_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -213,17 +226,20 @@ class MainWindow(QMainWindow):
         self.settings.update_checked = t
         self.save()
 
-    def _styles(self, base: float) -> str:
+    def _styles(self, base: float, portrait: bool = False) -> str:
+        song = 2.6 if portrait else 3.2
+        remain = 5.2 if portrait else 6.0
+        timer = 2.6 if portrait else 2.0
         return f"""
         QWidget#board {{ background: {BG}; }}
         QLabel {{ color: {TEXT}; }}
         QLabel#caption {{ color: {DIM}; font-size: {base * 0.85:.0f}px; font-weight: 700; letter-spacing: 1px; }}
-        QLabel#songName {{ font-size: {base * 3.2:.0f}px; font-weight: 800; }}
+        QLabel#songName {{ font-size: {base * song:.0f}px; font-weight: 800; }}
         QLabel#marker {{ color: {BLUE}; font-size: {base * 1.6:.0f}px; font-weight: 700; }}
         QLabel#elapsed {{ color: {DIM}; font-size: {base * 2.2:.0f}px; font-weight: 700; }}
-        QLabel#remain {{ font-size: {base * 6.0:.0f}px; font-weight: 900; }}
+        QLabel#remain {{ font-size: {base * remain:.0f}px; font-weight: 900; }}
         QLabel#nextName {{ color: {WARN}; font-size: {base * 2.0:.0f}px; font-weight: 800; }}
-        QLabel#showTimer {{ color: {ACCENT}; font-size: {base * 2.0:.0f}px; font-weight: 900; }}
+        QLabel#showTimer {{ color: {ACCENT}; font-size: {base * timer:.0f}px; font-weight: 900; }}
         QLabel#clock {{ font-size: {base * 2.0:.0f}px; font-weight: 800; }}
         QLabel#links {{ color: {DIM}; font-size: {base * 0.8:.0f}px; }}
         QLabel#statePill {{ font-size: {base * 1.3:.0f}px; font-weight: 900; border-radius: {base * 0.4:.0f}px;
@@ -232,13 +248,58 @@ class MainWindow(QMainWindow):
         QPushButton#gear:hover {{ color: {TEXT}; }}
         """
 
+    def _want_portrait(self) -> bool:
+        mode = self.settings.orientation
+        if mode == "portrait":
+            return True
+        if mode == "landscape":
+            return False
+        return self.height() > self.width() * 1.05          # вертикальный монитор / окно
+
+    def _set_portrait(self, on: bool) -> None:
+        """Вертикальный экран: всё друг под другом и крупнее —
+        состояние и часы → секундомер → трек → ОСТАЛОСЬ (во всю ширину) → далее → очередь → каналы."""
+        if on == self.portrait:
+            return
+        self.portrait = on
+        self.mid_layout.setDirection(QBoxLayout.TopToBottom if on else QBoxLayout.LeftToRight)
+        self.mid_layout.setStretchFactor(self.left_box, 3)
+        self.mid_layout.setStretchFactor(self.right_box, 3 if on else 2)
+        self.times_layout.setDirection(QBoxLayout.TopToBottom if on else QBoxLayout.LeftToRight)
+        self.remain_label.setAlignment((Qt.AlignHCenter if on else Qt.AlignRight) | Qt.AlignBottom)
+        self.elapsed_label.setAlignment((Qt.AlignHCenter if on else Qt.AlignLeft) | Qt.AlignBottom)
+        if on:                                     # «осталось» — главное: выше «прошло»
+            self.times_layout.removeWidget(self.elapsed_label)
+            self.times_layout.addWidget(self.elapsed_label, 0)
+        else:
+            self.times_layout.removeWidget(self.remain_label)
+            self.times_layout.addWidget(self.remain_label, 2)
+        self.top_layout.removeWidget(self.timer_w)
+        if on:
+            self.timer_layout.setAlignment(Qt.AlignHCenter)
+            self.outer.insertWidget(1, self.timer_w)
+        else:
+            self.outer.removeWidget(self.timer_w)
+            self.top_layout.insertWidget(3, self.timer_w)
+        self.playlist_label.setVisible(not on)     # на узком экране название плейлиста — над очередью
+        self.channels.max_rows = 4 if on else 2
+        self.outer.setStretchFactor(self.ch_box, 3 if on else 2)
+
     def _apply_fonts(self) -> None:
-        base = max(10.0, min(self.height() / 34.0, self.width() / 52.0) * self.settings.font_scale)
-        key = (round(base, 1),)
+        if not hasattr(self, "ch_box"):
+            return                                 # окно ещё строится
+        portrait = self._want_portrait()
+        self._set_portrait(portrait)
+        if portrait:      # вертикальный: ширины мало, высоты много — шрифт от ширины, крупнее
+            base = min(self.height() / 46.0, self.width() / 23.0)
+        else:
+            base = min(self.height() / 34.0, self.width() / 52.0)
+        base = max(10.0, base * self.settings.font_scale)
+        key = (round(base, 1), portrait)
         if key == self._last_layout_key:
             return
         self._last_layout_key = key
-        self.centralWidget().setStyleSheet(self._styles(base))
+        self.centralWidget().setStyleSheet(self._styles(base, portrait))
         self.progress.setFixedHeight(int(max(10, base * 0.9)))
         self.setlist.set_font_px(base * 1.15)
         self.channels.set_font_px(base * 0.85)
@@ -250,6 +311,7 @@ class MainWindow(QMainWindow):
     def apply_settings(self) -> None:
         s = self.settings
         self.right_box.setVisible(s.show_setlist)
+        self.timer_w.setVisible(s.show_timer)
         self.ch_box.setVisible(s.show_channels and s.x32_on)
         self.show_label.setVisible(s.show_timer)
         self.timer_caption.setVisible(s.show_timer)
