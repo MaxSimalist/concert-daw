@@ -47,6 +47,7 @@ class _Client:
         self.name = f"{addr[0]}"
         self.q: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=200)
         self.alive = True
+        self.console_want: Optional[list] = None   # табло: какие каналы пульта прислать (["auto"] — сам выбери)
 
     def send(self, data: bytes) -> None:
         if not self.alive:
@@ -217,6 +218,9 @@ class SyncServer:
             c.name = (f"{app}: " if app else "") + f"{msg.get('name') or c.addr[0]} ({c.addr[0]})"
         elif t == "get_songs" and self._songs_msg:
             c.send(self._songs_msg)
+        elif t == "console_want":
+            keys = msg.get("keys")
+            c.console_want = [str(k) for k in keys][:120] if isinstance(keys, list) else None
 
     def _drop(self, c: _Client) -> None:
         c.close()
@@ -247,6 +251,27 @@ class SyncServer:
     def _broadcast(self, data: bytes) -> None:
         with self._lock:
             clients = list(self._clients)
+        for c in clients:
+            c.send(data)
+
+    def console_wants(self) -> Optional[list]:
+        """Какие каналы пульта нужны подключённым табло: список ключей (+ "auto"), None — никому."""
+        with self._lock:
+            wants = [c.console_want for c in self._clients if c.alive and c.console_want is not None]
+        if not wants:
+            return None
+        out: list = []
+        for w in wants:
+            for k in w:
+                if k not in out:
+                    out.append(k)
+        return out
+
+    def publish_console(self, msg: dict) -> None:
+        """Состояние каналов пульта — только тем, кто его попросил (табло)."""
+        data = encode(dict(msg, t="console"))
+        with self._lock:
+            clients = [c for c in self._clients if c.alive and c.console_want is not None]
         for c in clients:
             c.send(data)
 

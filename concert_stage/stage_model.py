@@ -3,8 +3,8 @@ stage_model.py — Настройки и логика табло Concert Stage (
 
 * StageSettings / SettingsStore — настройки в %APPDATA%\\ConcertStage\\settings.json.
 * Что показывать: текущий трек, сколько осталось, очередь, текущий маркер, секундомер.
-* ReadOnlyX32 — обёртка над подключением к пульту, которая пропускает только ЗАПРОСЫ
-  (адрес без значения) и подписки. Табло физически не может ничего поменять на пульте.
+* RelayMirror — каналы пульта, которые собирает и присылает Concert DAW. Табло к пульту
+  не подключается вообще: только Concert DAW держит связь с X32.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Optional
 
-from x32_osc import ALL_KEYS, ConsoleMirror, default_name
+from x32_osc import ALL_KEYS, ConsoleMirror, default_name  # noqa: F401
 
 
 def app_data_dir() -> Path:
@@ -196,36 +196,75 @@ def next_marker(markers: list, pos: float) -> Optional[tuple[str, float]]:
 # ══════════════════════════════════════════════════════════════════════════════
 # Пульт X32 — только чтение
 # ══════════════════════════════════════════════════════════════════════════════
-class ReadOnlyX32:
-    """Пропускает только запросы (адрес без значений), /xremote и подписку /meters.
-    Любая команда, которая могла бы что-то изменить на пульте, отбрасывается."""
+class RelayMirror:
+    """Каналы пульта, которые прислал Concert DAW (табло к пульту само не подключается).
+    Интерфейс как у x32_osc.ConsoleMirror: name(), levels(), on, fader, names."""
 
-    ALLOWED_WITH_ARGS = {"/meters"}
+    STALE_S = 2.5
 
-    def __init__(self, osc) -> None:
-        self.osc = osc
-        self.blocked = 0
+    def __init__(self) -> None:
+        self.names: dict = {}
+        self.on: dict = {}
+        self.fader: dict = {}
+        self._levels: dict = {}
+        self.auto: list = []
+        self.order: list = []          # каналы в том порядке, как прислал DAW
+        self.online = False            # Concert DAW на связи с пультом
+        self.ip = ""
+        self.faders_on = True
+        self.at = 0.0                  # время последнего сообщения (местное), 0 — ещё не было
 
-    def send(self, address: str, *args) -> bool:
-        if args and address not in self.ALLOWED_WITH_ARGS:
-            self.blocked += 1
-            return False
-        return self.osc.send(address, *args)
+    def update(self, msg: dict, now: float) -> None:
+        self.online = bool(msg.get("online"))
+        self.ip = str(msg.get("ip", ""))
+        self.faders_on = bool(msg.get("faders_on", True))
+        self.auto = [str(k) for k in msg.get("auto") or []]
+        if isinstance(msg.get("names"), dict):
+            self.names.update({str(k): str(v) for k, v in msg["names"].items()})
+        self.order = []
+        for item in msg.get("ch") or []:
+            k = str(item.get("k", ""))
+            if not k:
+                continue
+            self.order.append(k)
+            if item.get("n"):
+                self.names[k] = str(item["n"])
+            if "on" in item:
+                self.on[k] = int(item["on"])
+            else:
+                self.on.pop(k, None)
+            if "f" in item:
+                self.fader[k] = float(item["f"])
+            self._levels[k] = [float(v) for v in item.get("lv") or []]
+        self.at = now
 
-    def subscribe(self) -> bool:
-        return self.send("/xremote")
+    def fresh(self, now: float) -> bool:
+        return self.at > 0 and now - self.at < self.STALE_S
 
-    def __getattr__(self, name):            # configure, close, poll, connected, ip, last_rx…
-        if name in ("recall_scene", "recall_snippet", "request"):
-            raise AttributeError(f"табло не управляет пультом: {name}")
-        return getattr(self.osc, name)
+    def name(self, key: str) -> str:
+        return self.names.get(key) or default_name(key)
+
+    def levels(self, key: str) -> list:
+        return list(self._levels.get(key, [])) if self.online else []
+
+    def keys_for(self, chosen: list) -> list:
+        """Какие плитки показывать: выбранные в настройках или «авто» от DAW."""
+        return list(chosen) if chosen else list(self.auto or self.order)
 
 
-def auto_channels(mirror: ConsoleMirror) -> list[str]:
-    """Каналы по умолчанию: входы 1–32, у которых на пульте задано своё название, + MAIN LR."""
-    named = [k for k in ALL_KEYS if k.startswith("ch/") and mirror.names.get(k)
-             and mirror.names.get(k) != default_name(k)]
-    return named + ["main/st"]
+def console_caption(connected: bool, relay: "RelayMirror", n: int, now: float) -> tuple[str, bool]:
+    """(подпись над каналами, есть ли живые данные)."""
+    if not connected:
+        return "ПУЛЬТ X32 · нет связи с Concert DAW", False
+    if not relay.fresh(now):
+        return "ПУЛЬТ X32 · Concert DAW не присылает данные пульта (обновите Concert DAW до 1.4)", False
+    if not relay.ip:
+        return "ПУЛЬТ X32 · Concert DAW не подключён к пульту (в DAW: зона «Пульт X32» → Подключить)", False
+    if not relay.faders_on:
+        return "ПУЛЬТ X32 · в Concert DAW выключена синхронизация с пультом (Настройки → Пульт X32)", False
+    if not relay.online:
+        return f"ПУЛЬТ X32 · у Concert DAW нет связи с пультом ({relay.ip})", False
+    return f"ПУЛЬТ X32 (через Concert DAW) · {n} кан.", True
 
 
 def level_db(lin: float) -> float:
@@ -238,7 +277,7 @@ def meter_fraction(lin: float, floor_db: float = -60.0) -> float:
     return min(1.0, max(0.0, (db - floor_db) / -floor_db))
 
 
-def is_muted(mirror: ConsoleMirror, key: str) -> Optional[bool]:
+def is_muted(mirror, key: str) -> Optional[bool]:
     """True — канал выключен (MUTE), False — включён, None — пульт ещё не ответил."""
     on = mirror.on.get(key)
     return None if on is None else on == 0

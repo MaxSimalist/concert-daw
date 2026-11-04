@@ -5,6 +5,7 @@ gui_main.py — Главное окно Concert Stage: табло для тех,
 В центре — какой трек играет, крупно сколько осталось, текущая часть песни (маркер),
 полоса прогресса и следующий трек. Справа — очередь треков плейлиста.
 Снизу — каналы пульта X32: уровень сигнала, фейдер, MUTE (только показ, без управления).
+Данные пульта собирает и присылает Concert DAW — табло само к пульту не подключается.
 
 Клавиши: F11 — на весь экран / обратно, Esc — выйти из полноэкранного режима,
 F2 — настройки. Правый клик — меню.
@@ -22,16 +23,13 @@ from PySide6.QtWidgets import (QApplication, QBoxLayout, QHBoxLayout, QLabel, QM
                                QVBoxLayout, QWidget)
 
 import sync_client
-import x32_osc
 from gui_board import (ACCENT, ALERT, BG, BLUE, DIM, FAINT, TEXT, WARN, ChannelsPanel, ProgressStrip,
                        SetlistView)
 from gui_update import UpdateButton
-from stage_model import (ReadOnlyX32, SettingsStore, StageSettings, app_data_dir, auto_channels,
+from stage_model import (RelayMirror, SettingsStore, StageSettings, app_data_dir, console_caption,
                          current_marker, find_setlist, fmt_remaining, fmt_time, next_marker, remaining_level)
 from version import APP_NAME, VERSION
 
-KEEPALIVE_S = 8.0          # /xremote и /meters действуют 10 с — продлеваем
-REQUERY_S = 30.0           # названия/фейдеры/MUTE переспрашиваем раз в 30 с (на случай потери пакетов)
 
 
 class _CursorHider(QObject):
@@ -78,19 +76,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} {VERSION} — табло")
         # ── связь ───────────────────────────────────────────────────────────
         self.client = sync_client.SyncClient()
-        self.osc_raw = x32_osc.X32Osc()
-        self.osc = ReadOnlyX32(self.osc_raw)
-        self.mirror = x32_osc.ConsoleMirror()
+        self.mirror = RelayMirror()                 # каналы пульта — от Concert DAW
+        self._console_at = 0.0
+        self._console_live = False
         self._daw_found: Optional[list] = None
         self._daw_searching = False
         self._daw_last_search = 0.0
         self._daw_lost_since = 0.0
-        self._x32_found: Optional[list] = None
-        self._x32_searching = False
-        self._x32_last_search = 0.0
-        self._x32_keepalive = 0.0
-        self._x32_requery = 0.0
-        self._x32_was_online = False
         self._blink = False
         self._last_layout_key = None
         self._build_ui()
@@ -228,7 +220,7 @@ class MainWindow(QMainWindow):
 
     def _styles(self, base: float, portrait: bool = False) -> str:
         song = 2.6 if portrait else 3.2
-        remain = 5.2 if portrait else 6.0
+        remain = 3.8 if portrait else 4.2          # обратный отсчёт: крупно, но не во весь экран
         timer = 2.6 if portrait else 2.0
         return f"""
         QWidget#board {{ background: {BG}; }}
@@ -312,7 +304,7 @@ class MainWindow(QMainWindow):
         s = self.settings
         self.right_box.setVisible(s.show_setlist)
         self.timer_w.setVisible(s.show_timer)
-        self.ch_box.setVisible(s.show_channels and s.x32_on)
+        self.ch_box.setVisible(s.show_channels)
         self.show_label.setVisible(s.show_timer)
         self.timer_caption.setVisible(s.show_timer)
         self.clock_label.setVisible(s.show_clock)
@@ -326,12 +318,8 @@ class MainWindow(QMainWindow):
         else:
             self.client.disconnect()
             self._daw_last_search = 0.0
-        # пульт
-        if s.x32_on and s.x32_ip:
-            self.osc.configure(s.x32_ip)
-            self._x32_keepalive = self._x32_requery = 0.0
-        elif not s.x32_on:
-            self.osc.close()
+        # пульт — просим у Concert DAW нужные каналы (или «авто»: с названиями + MAIN)
+        self.client.want_console((list(s.channels) or ["auto"]) if s.show_channels else None)
         self._update_channel_keys()
 
     def save(self) -> None:
@@ -436,57 +424,8 @@ class MainWindow(QMainWindow):
         elif s.daw_name and now - self._daw_lost_since > 10.0 and now - self._daw_last_search > 10.0:
             self._daw_search()                       # пропала связь — может, у компьютера новый IP
 
-    def _x32_search(self) -> None:
-        if self._x32_searching:
-            return
-        self._x32_searching = True
-        self._x32_last_search = time.monotonic()
-
-        def run():
-            try:
-                self._x32_found = x32_osc.discover(1.5)
-            except Exception:
-                self._x32_found = []
-        threading.Thread(target=run, daemon=True, name="x32-discover").start()
-
-    def _x32_link(self) -> None:
-        s, now = self.settings, time.monotonic()
-        if not s.x32_on:
-            return
-        if self._x32_searching and self._x32_found is not None:
-            found, self._x32_found, self._x32_searching = self._x32_found, None, False
-            if found and not s.x32_ip:
-                s.x32_ip = found[0]["ip"]
-                self.save()
-                self.osc.configure(s.x32_ip)
-                self._x32_keepalive = self._x32_requery = 0.0
-        if not s.x32_ip:
-            if now - self._x32_last_search > 10.0:
-                self._x32_search()
-            return
-        if now - self._x32_keepalive > KEEPALIVE_S:
-            self._x32_keepalive = now
-            self.osc.subscribe()
-            for src in x32_osc.METER_SOURCES:
-                self.osc.send("/meters", src)
-        online = self.osc.connected
-        if (online and not self._x32_was_online) or now - self._x32_requery > REQUERY_S:
-            self._x32_requery = now
-            self._query_console()
-        self._x32_was_online = online
-
-    def _query_console(self) -> None:
-        """Спросить у пульта названия, фейдеры и MUTE (только запросы — без значений)."""
-        keys = set(self.channels.keys) | {k for k in x32_osc.ALL_KEYS if k.startswith("ch/")}
-        for address in self.mirror.queries(sorted(keys)):
-            self.osc.send(address)
-        for address in self.mirror.dca_queries():
-            self.osc.send(address)
-
     def _update_channel_keys(self) -> None:
-        s = self.settings
-        keys = list(s.channels) if s.channels else auto_channels(self.mirror)
-        self.channels.set_keys(keys)
+        self.channels.set_keys(self.mirror.keys_for(self.settings.channels))
 
     # ═════════════════════════════ кадр ═════════════════════════════════════
     def _toggle_blink(self) -> None:
@@ -497,22 +436,17 @@ class MainWindow(QMainWindow):
         self._daw_link()
         for _kind, _value in self.client.poll():
             pass                                     # всё нужное читаем из client.state
-        self._x32_link()
-        names_changed = False
-        for address, args in self.osc.poll():
-            hit = self.mirror.apply(address, args)
-            if hit is not None and hit[1] == "name":
-                names_changed = True
-        if names_changed and not self.settings.channels:
+        c = self.client
+        now = time.monotonic()
+        if c.console_at and c.console_at != self._console_at:
+            self._console_at = c.console_at
+            self.mirror.update(c.console, now)
             self._update_channel_keys()
         self._tick_board()
-        if self.settings.show_channels and self.settings.x32_on:
-            online = self.osc.connected
-            self.channels.tick(self.mirror, online)
-            n = len(self.channels.keys)
-            cap = f"ПУЛЬТ X32 · {n} кан." if online else (
-                "ПУЛЬТ X32 · ищу в сети…" if not self.settings.x32_ip else
-                f"ПУЛЬТ X32 · нет связи ({self.settings.x32_ip})")
+        if self.settings.show_channels:
+            cap, live = console_caption(c.connected, self.mirror, len(self.channels.keys), now)
+            self._console_live = live
+            self.channels.tick(self.mirror, live)
             self._set(self.ch_caption, cap)
 
     @staticmethod
@@ -533,8 +467,8 @@ class MainWindow(QMainWindow):
         el = c.show_elapsed()
         self._set(self.show_label, fmt_time(el, hours=True) if el is not None else "—:——:——")
         self._set_color(self.show_label, ACCENT if el is not None else FAINT)
-        daw = ("● DAW" if c.connected else "○ DAW") + ("   ● X32" if self.osc.connected else
-                                                     ("   ○ X32" if s.x32_on else ""))
+        daw = ("● DAW" if c.connected else "○ DAW") + (("   ● X32" if self._console_live else "   ○ X32")
+                                                     if s.show_channels else "")
         self._set(self.link_label, daw)
 
         if not c.connected:
@@ -614,7 +548,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e) -> None:
         self.save()
         self.client.disconnect()
-        self.osc.close()
         super().closeEvent(e)
 
 

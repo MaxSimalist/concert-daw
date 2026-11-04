@@ -136,6 +136,9 @@ class SyncClient:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._synced = False
+        self.console: dict = {}            # каналы пульта от Concert DAW (последнее сообщение)
+        self.console_at = 0.0              # когда пришло (местное время)
+        self._console_want: Optional[list] = None
 
     # ── часы ────────────────────────────────────────────────────────────────
     @staticmethod
@@ -235,6 +238,8 @@ class SyncClient:
             self._sock = sock
             self.error = ""
             self._send({"t": "hello", "app": "Concert Stage", "name": self.name})
+            if self._console_want is not None:
+                self._send({"t": "console_want", "keys": self._console_want})
             for _ in range(5):                       # быстрые первые замеры часов
                 self._send({"t": "ping", "c": self.now()})
             self._serve(sock)
@@ -282,6 +287,9 @@ class SyncClient:
         elif t == "hello":
             self.server_name = str(msg.get("name", ""))
             self._set_connected(True)
+        elif t == "console":
+            self.console = msg
+            self.console_at = self.now()
         elif t == "songs":
             self.songs = msg.get("playlists") or []
             self._events.put(("songs", self.songs))
@@ -300,6 +308,13 @@ class SyncClient:
             self.state = st
             if st.seq != prev.seq or st.song_id != prev.song_id or st.playing != prev.playing:
                 self._events.put(("transport", st))
+
+    def want_console(self, keys: Optional[list]) -> None:
+        """Попросить у Concert DAW каналы пульта: ["ch/01", …] или ["auto"]; None — не нужно."""
+        keys = list(keys) if keys is not None else None
+        if keys != self._console_want:
+            self._console_want = keys
+            self._send({"t": "console_want", "keys": keys})
 
     def poll(self) -> list[tuple]:
         out = []

@@ -17,7 +17,7 @@ from stage_model import StageSettings, app_data_dir
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: StageSettings, mirror: x32_osc.ConsoleMirror, update_button=None, parent=None):
+    def __init__(self, settings: StageSettings, mirror, update_button=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Настройки табло")
         self.s = deepcopy(settings)
@@ -99,20 +99,14 @@ class SettingsDialog(QDialog):
         # ── пульт ──────────────────────────────────────────────────────────
         w = QWidget()
         v = QVBoxLayout(w)
-        self.x32_on = QCheckBox("Показывать каналы пульта Behringer X32 (только смотреть — табло ничего "
-                                "не меняет на пульте)")
-        self.x32_on.setChecked(self.s.x32_on)
-        v.addWidget(self.x32_on)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("IP пульта:"))
-        self.x32_ip = QLineEdit(self.s.x32_ip)
-        self.x32_ip.setPlaceholderText("пусто — искать в сети")
-        row.addWidget(self.x32_ip, 1)
-        findx = QPushButton("Найти пульт")
-        findx.clicked.connect(self._find_x32)
-        row.addWidget(findx)
-        v.addLayout(row)
-        self.x32_note = QLabel("")
+        info = QLabel("Данные пульта Behringer X32 табло получает от Concert DAW: к пульту подключён только\n"
+                      "Concert DAW (его зона «Пульт X32»), а он собирает и пересылает названия, уровни,\n"
+                      "фейдеры и MUTE нужных каналов. Табло к пульту не подключается и ничего на нём не меняет.")
+        info.setWordWrap(True)
+        v.addWidget(info)
+        state = "есть" if self.mirror.online else "нет"
+        self.x32_note = QLabel(f"Сейчас связь Concert DAW с пультом: {state}"
+                               + (f" ({self.mirror.ip})" if self.mirror.ip else ""))
         self.x32_note.setObjectName("caption")
         v.addWidget(self.x32_note)
         v.addWidget(QLabel("Какие каналы показывать (ничего не отмечено — каналы 1–32 с названиями на "
@@ -187,18 +181,6 @@ class SettingsDialog(QDialog):
             self.daw_port.setValue(int(d["port"]))
             self.s.daw_name = d["name"]
 
-    def _find_x32(self) -> None:
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            found = x32_osc.discover(1.5)
-        finally:
-            QApplication.restoreOverrideCursor()
-        if found:
-            self.x32_ip.setText(found[0]["ip"])
-            self.x32_note.setText("Найдено: " + ", ".join(f"{d['name']} ({d['ip']})" for d in found))
-        else:
-            self.x32_note.setText("Пульт не найден. Проверьте сеть или впишите IP (на пульте: Setup → Network).")
-
     def result_settings(self) -> StageSettings:
         s = self.s
         for key, c in self.cb.items():
@@ -213,8 +195,6 @@ class SettingsDialog(QDialog):
         if new_ip != s.daw_ip and not self.daw_found.count():
             s.daw_name = ""                       # IP вписали руками — имя прежнего компьютера не держим
         s.daw_ip, s.daw_port = new_ip, int(self.daw_port.value())
-        s.x32_on = self.x32_on.isChecked()
-        s.x32_ip = self.x32_ip.text().strip()
         s.channels = [self.ch_list.item(i).data(Qt.UserRole) for i in range(self.ch_list.count())
                       if self.ch_list.item(i).data(Qt.UserRole)
                       and self.ch_list.item(i).checkState() == Qt.Checked]

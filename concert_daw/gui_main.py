@@ -33,7 +33,7 @@ from model import KEY_ALGO_VERSION, is_click_like
 from recorder import Recorder, attach_to_song, free_space_gb, load_session, parse_channels
 import dsp
 from sync_server import SyncServer
-from x32_osc import FxTempo, X32Osc
+from x32_osc import ALL_KEYS as X32_KEYS, FxTempo, X32Osc, default_name
 from gui_settings import SettingsDialog
 from gui_rec_channels import RecChannelsDialog, summary_text
 from gui_update import UpdateButton
@@ -1940,6 +1940,40 @@ class MainWindow(QMainWindow):
             self.sync.publish_state(sg.id if sg else "", sg.name if sg else "",
                                     sg.output_duration if sg else 0.0, 0.0, False, extra=self._sync_extra())
 
+    def _publish_console(self) -> None:
+        """Каналы пульта для табло Concert Stage: DAW уже на связи с X32 — он собирает названия,
+        фейдеры, MUTE и уровни нужных каналов и отдаёт их по сети (табло к пульту не подключается)."""
+        wants = self.sync.console_wants()
+        if wants is None:
+            if self.console.extra_keys:
+                self.console.set_extra_keys(set())
+            return
+        mirror = self.console.mirror
+        auto = [k for k in X32_KEYS if k.startswith("ch/") and mirror.names.get(k)
+                and mirror.names.get(k) != default_name(k)] + ["main/st"]
+        keys = [k for k in wants if k != "auto" and k in X32_KEYS]
+        if "auto" in wants:
+            keys += [k for k in auto if k not in keys]
+        self.console.set_extra_keys(set(keys))
+        online = bool(self.console.enabled and self.console.online)
+        ch = []
+        for k in keys:
+            item = {"k": k, "n": mirror.name(k)}
+            if k in mirror.on:
+                item["on"] = int(mirror.on[k])
+            if k in mirror.fader:
+                item["f"] = round(float(mirror.fader[k]), 4)
+            lv = mirror.levels(k) if online else []
+            if lv:
+                item["lv"] = [round(float(v), 4) for v in lv]
+            ch.append(item)
+        msg = {"online": online, "ip": self.cfg.osc_ip or "", "faders_on": bool(self.cfg.osc_faders),
+               "auto": auto, "ch": ch}
+        self._console_names_tick = getattr(self, "_console_names_tick", 0) + 1
+        if self._console_names_tick % 20 == 1:       # раз в ~2 с — все названия (для настроек табло)
+            msg["names"] = {k: v for k, v in mirror.names.items() if v}
+        self.sync.publish_console(msg)
+
     def _sync_extra(self) -> dict:
         """Для табло и других программ: следующий трек, пауза, плейлист, секундомер, маркер."""
         nxt = self._neighbor(+1)
@@ -2038,6 +2072,8 @@ class MainWindow(QMainWindow):
         self._show_timer_tick()
         if self.sync.running:
             self._publish_state()
+            if self._sync_tick % 3 == 0:            # ~10 раз в секунду: пульт для табло
+                self._publish_console()
             self._sync_tick += 1
             if self._sync_tick % 60 == 0:           # раз в ~2 с: список треков и счётчик подключений
                 self._publish_songs()

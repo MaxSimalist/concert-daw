@@ -330,6 +330,7 @@ class ConsolePanel(QFrame):
         self._dirty: dict[str, float] = {}
         self._online = False
         self._names_requested = False
+        self.extra_keys: set = set()             # каналы, которые просит табло (Concert Stage) по сети
         self.setObjectName("mixerPanel")
 
         lay = QVBoxLayout(self)
@@ -460,8 +461,8 @@ class ConsolePanel(QFrame):
 
     def _subscribe_meters(self) -> None:
         """Уровни сигнала с пульта — только те блоки, что нужны добавленным фейдерам."""
-        needed = {src for key in self.strips for src, _ in meter_slots(key)}
-        if any(k.startswith("dca/") for k in self.strips):
+        needed = {src for key in set(self.strips) | self.extra_keys for src, _ in meter_slots(key)}
+        if any(k.startswith("dca/") for k in set(self.strips) | self.extra_keys):
             needed.add("/meters/0")              # каналы и шины, из которых складывается DCA
         for src in METER_SOURCES:
             if src in needed:
@@ -471,6 +472,26 @@ class ConsolePanel(QFrame):
         """Вызывается таймером главного окна ~30 раз в секунду."""
         for key, strip in self.strips.items():
             strip.push_levels(self.mirror.levels(key) if self._online else [])
+
+    def set_extra_keys(self, keys) -> None:
+        """Табло попросило каналы: считать их состояние и подписаться на их уровни
+        (только запросы — ничего на пульте не меняется)."""
+        keys = {k for k in keys if k in ALL_KEYS}
+        new = keys - self.extra_keys - set(self.strips)
+        added_meters = bool(keys - self.extra_keys)
+        self.extra_keys = keys
+        if self.enabled and self._online:
+            for address in self.mirror.queries(sorted(new)):
+                self.osc.send(address)
+            if any(k.startswith("dca/") for k in new):
+                for address in self.mirror.dca_queries():   # состав DCA — для её уровня
+                    self.osc.send(address)
+            if added_meters:
+                self._subscribe_meters()
+
+    @property
+    def online(self) -> bool:
+        return self._online
 
     def _check_link(self) -> None:
         online = self.enabled and self.osc.connected
@@ -493,10 +514,10 @@ class ConsolePanel(QFrame):
             return
         self.osc.subscribe()
         self._subscribe_meters()
-        if any(k.startswith("dca/") for k in self.strips):
+        if any(k.startswith("dca/") for k in set(self.strips) | self.extra_keys):
             for address in self.mirror.dca_queries():
                 self.osc.send(address)
-        for address in self.mirror.queries(self.strips):
+        for address in self.mirror.queries(sorted(set(self.strips) | self.extra_keys)):
             self.osc.send(address)
         if not self._names_requested:
             # названия всех каналов — чтобы в меню «＋» было видно «Ch 05 — Гитара»

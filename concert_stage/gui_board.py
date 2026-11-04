@@ -109,8 +109,7 @@ class SetlistView(QWidget):
         first = 0
         if self.index >= 0 and len(self.songs) > visible:
             first = min(max(0, self.index - 1), len(self.songs) - visible)   # один сыгранный сверху
-        f_name, f_num = font(self.px, True), font(self.px * 0.8, False)
-        fm = QFontMetrics(f_name)
+        f_num = font(self.px * 0.8, False)
         num_w = QFontMetrics(f_num).horizontalAdvance("00") + self.px * 0.6
         dur_w = QFontMetrics(f_num).horizontalAdvance("00:00") + self.px * 0.4
         y = 0.0
@@ -130,11 +129,18 @@ class SetlistView(QWidget):
             p.setPen(QColor(color if cur or i >= self.index else DIM))
             p.setFont(f_num)
             p.drawText(QRectF(self.px * 0.4, y, num_w, row_h - 3), Qt.AlignVCenter | Qt.AlignLeft, f"{i + 1}")
-            p.setFont(f_name)
             p.setPen(QColor(color))
             name_rect = QRectF(num_w + self.px * 0.4, y, w - num_w - dur_w - self.px, row_h - 3)
-            p.drawText(name_rect, Qt.AlignVCenter | Qt.AlignLeft,
-                       fm.elidedText(str(sg.get("name", "")), Qt.ElideRight, int(name_rect.width())))
+            name = str(sg.get("name", ""))
+            # название — ЦЕЛИКОМ: длинное — шрифт поменьше (до 60 %), а если и так не влезает — в 2 строки
+            f = font(self.px, True)
+            while f.pixelSize() > self.px * 0.6 and QFontMetrics(f).horizontalAdvance(name) > name_rect.width():
+                f.setPixelSize(f.pixelSize() - 1)
+            p.setFont(f)
+            if QFontMetrics(f).horizontalAdvance(name) <= name_rect.width():
+                p.drawText(name_rect, Qt.AlignVCenter | Qt.AlignLeft, name)
+            else:
+                p.drawText(name_rect, Qt.AlignVCenter | Qt.AlignLeft | Qt.TextWordWrap, name)
             p.setFont(f_num)
             dur = float(sg.get("duration", 0.0) or 0.0)
             p.drawText(QRectF(w - dur_w - self.px * 0.4, y, dur_w, row_h - 3), Qt.AlignVCenter | Qt.AlignRight,
