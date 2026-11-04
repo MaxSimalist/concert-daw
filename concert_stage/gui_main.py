@@ -301,7 +301,7 @@ class MainWindow(QMainWindow):
         self._last_layout_key = key
         self.centralWidget().setStyleSheet(self._styles(base, portrait))
         self.progress.setFixedHeight(int(max(10, base * 0.9)))
-        self.setlist.set_font_px(base * 1.15)
+        self.setlist.set_font_px(base * (1.45 if portrait else 1.5))   # очередь — крупно
         self.channels.set_font_px(base * 0.85)
 
     def resizeEvent(self, e) -> None:

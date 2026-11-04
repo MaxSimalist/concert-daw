@@ -4,6 +4,7 @@ gui_board.py — Элементы табло: полоса прогресса, �
 """
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from PySide6.QtCore import QRectF, Qt
@@ -144,8 +145,12 @@ class SetlistView(QWidget):
         p.end()
 
 
+METER_MARKS = (0, -6, -12, -20, -30, -40, -60)     # деления шкалы, dBFS
+
+
 class ChannelTile(QWidget):
-    """Канал пульта: название, уровень сигнала, положение фейдера, MUTE (только показ)."""
+    """Канал пульта (только показ): название, ВЕРТИКАЛЬНЫЙ индикатор уровня со шкалой в dB,
+    уровень числом, фейдер и лампа состояния: зелёная «В ЭФИРЕ» / красная «ОТКЛЮЧЕН» (MUTE)."""
 
     def __init__(self, key: str, parent=None):
         super().__init__(parent)
@@ -153,11 +158,12 @@ class ChannelTile(QWidget):
         self.name = key
         self.levels: list[float] = []
         self.holds: list[float] = []
+        self.peak_db: Optional[float] = None
         self.muted: Optional[bool] = None
         self.fader_text = ""
         self.px = 16.0
         self.online = False
-        self.setMinimumSize(60, 40)
+        self.setMinimumSize(48, 90)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
     def set_state(self, name: str, levels: list, muted: Optional[bool], fader: Optional[float],
@@ -166,63 +172,110 @@ class ChannelTile(QWidget):
         if len(self.holds) != len(fr):
             self.holds = list(fr)
         self.holds = [max(f, h - 0.012) for f, h in zip(fr, self.holds)]   # «пик» медленно опускается
+        loud = max(levels) if levels else 0.0
+        db = None if not levels else (20 * math.log10(loud) if loud > 1e-6 else -120.0)
         text = format_db(fader) if fader is not None else ""
-        state = (name, [round(f, 3) for f in fr], [round(h, 3) for h in self.holds], muted, text, online)
+        db_shown = None if db is None else max(-60, round(db))
+        state = (name, [round(f, 3) for f in fr], [round(h, 3) for h in self.holds], muted, text, online,
+                 db_shown)
         if state != getattr(self, "_state", None):
             self._state = state
             self.name, self.levels, self.muted, self.fader_text, self.online = name, fr, muted, text, online
+            self.peak_db = db
             self.update()
 
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
-        muted = self.muted is True
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#5a1218" if muted else PANEL))
+        p.setBrush(QColor(PANEL))
         p.drawRoundedRect(QRectF(0, 0, w, h), 8, 8)
-        pad = max(4.0, self.px * 0.35)
-        name_h = self.px * 1.3
-        p.setFont(font(self.px, True))
+        pad = max(3.0, self.px * 0.3)
+        # название (сверху, по центру; длинное — сокращается)
+        p.setFont(font(self.px * 0.95, True))
         fm = QFontMetrics(p.font())
+        name_h = fm.height() + 2
         p.setPen(QColor(TEXT if self.online else DIM))
-        p.drawText(QRectF(pad, pad * 0.6, w - 2 * pad, name_h), Qt.AlignLeft | Qt.AlignVCenter,
+        p.drawText(QRectF(pad, pad * 0.6, w - 2 * pad, name_h), Qt.AlignHCenter | Qt.AlignVCenter,
                    fm.elidedText(self.name, Qt.ElideRight, int(w - 2 * pad)))
-        # индикатор уровня
-        bar_top = pad * 0.6 + name_h + pad * 0.4
-        bottom_h = self.px * 1.25
-        bar_h = max(6.0, h - bar_top - bottom_h - pad)
+        # уровень числом
+        small = font(self.px * 0.8, True)
+        p.setFont(small)
+        sm = QFontMetrics(small)
+        y = pad * 0.6 + name_h
+        db_txt = "" if self.peak_db is None or not self.online else (
+            "−∞" if self.peak_db <= -60 else f"{self.peak_db:.0f} dB".replace("-", "−"))
+        p.setPen(QColor(ALERT if self.peak_db is not None and self.peak_db > -1 else TEXT))
+        p.drawText(QRectF(pad, y, w - 2 * pad, sm.height()), Qt.AlignHCenter | Qt.AlignVCenter, db_txt)
+        y += sm.height() + 2
+        # низ: фейдер и лампа состояния
+        lamp_font = font(self.px * 0.72, True)
+        lm = QFontMetrics(lamp_font)
+        lamp_h = lm.height() + pad * 1.2
+        fader_h = sm.height() if self.fader_text else 0
+        bottom = h - pad - lamp_h - fader_h - 2
+        # вертикальный индикатор + шкала dB слева от него
+        tiny = font(max(8.0, self.px * 0.62), False)
+        tm = QFontMetrics(tiny)
+        scale_w = tm.horizontalAdvance("−60") + 3
+        bar_h = max(10.0, bottom - y - 2)
         n = max(1, len(self.levels))
-        gap = 3.0
-        bw = (w - 2 * pad - gap * (n - 1)) / n
+        gap = 2.0
+        bars_w = min(w - 2 * pad - scale_w, max(10.0, self.px * 0.9) * n + gap * (n - 1))
+        x0 = pad + (w - 2 * pad - scale_w - bars_w) / 2 + scale_w
+        p.setFont(tiny)
+        for mark in METER_MARKS:
+            fy = y + bar_h * (1 - meter_fraction(10 ** (mark / 20)))
+            p.setPen(QColor(FAINT))
+            p.drawLine(int(x0 - 3), int(fy), int(x0 + bars_w), int(fy))
+            if bar_h > tm.height() * 5 or mark in (0, -20, -60):
+                p.setPen(QColor(DIM))
+                p.drawText(QRectF(x0 - scale_w - 2, fy - tm.height() / 2, scale_w - 2, tm.height()),
+                           Qt.AlignRight | Qt.AlignVCenter, str(mark).replace("-", "−"))
+        bw = (bars_w - gap * (n - 1)) / n
+        p.setPen(Qt.NoPen)
         for i in range(n):
-            x = pad + i * (bw + gap)
-            p.setBrush(QColor("#0b0d10"))
-            p.drawRoundedRect(QRectF(x, bar_top, bw, bar_h), 3, 3)
+            x = x0 + i * (bw + gap)
+            p.setBrush(QColor("#06080a"))
+            p.drawRoundedRect(QRectF(x, y, bw, bar_h), 3, 3)
             if i < len(self.levels) and self.online:
                 f = self.levels[i]
-                color = ALERT if f > 0.95 else (WARN if f > 0.8 else ACCENT)
-                if muted:
-                    color = "#7b5a5e"
-                p.setBrush(QColor(color))
-                p.drawRoundedRect(QRectF(x, bar_top, bw * f, bar_h), 3, 3)
+                # зелёный → жёлтый (выше −12) → красный (выше −3): рисуем снизу вверх зонами
+                for lo, hi, color in ((0.0, 0.8, ACCENT), (0.8, 0.95, WARN), (0.95, 1.0, ALERT)):
+                    if f > lo:
+                        top = min(f, hi)
+                        c = QColor(color)
+                        if self.muted:
+                            c = QColor("#55606a")          # канал выключен — сигнал есть, но серый
+                        p.setBrush(c)
+                        p.drawRect(QRectF(x, y + bar_h * (1 - top), bw, bar_h * (top - lo)))
                 if i < len(self.holds) and self.holds[i] > 0.01:
                     p.setBrush(QColor(TEXT))
-                    hx = x + bw * self.holds[i]
-                    p.drawRect(QRectF(min(hx, x + bw - 2), bar_top, 2, bar_h))
-        # низ: фейдер и MUTE
-        y = h - bottom_h - pad * 0.4
-        p.setFont(font(self.px * 0.85, False))
-        p.setPen(QColor(DIM))
+                    p.drawRect(QRectF(x, y + bar_h * (1 - self.holds[i]), bw, 2))
+        # фейдер
+        yb = h - pad - lamp_h
         if self.fader_text:
-            p.drawText(QRectF(pad, y, w - 2 * pad, bottom_h), Qt.AlignLeft | Qt.AlignVCenter,
-                       f"фейдер {self.fader_text} dB")
-        if muted:
-            p.setFont(font(self.px * 0.95, True))
-            p.setPen(QColor("#ffd5d8"))
-            p.drawText(QRectF(pad, y, w - 2 * pad, bottom_h), Qt.AlignRight | Qt.AlignVCenter, "MUTE")
-        elif self.muted is None and self.online:
-            p.drawText(QRectF(pad, y, w - 2 * pad, bottom_h), Qt.AlignRight | Qt.AlignVCenter, "…")
+            p.setFont(small)
+            p.setPen(QColor(DIM))
+            p.drawText(QRectF(pad, yb - fader_h - 2, w - 2 * pad, fader_h), Qt.AlignHCenter | Qt.AlignVCenter,
+                       f"F {self.fader_text}")
+        # лампа: В ЭФИРЕ / ОТКЛЮЧЕН
+        if self.muted is None or not self.online:
+            color, text, tcolor = FAINT, ("…" if self.online else "нет связи"), DIM
+        elif self.muted:
+            color, text, tcolor = ALERT, "ОТКЛЮЧЕН", "#ffffff"
+        else:
+            color, text, tcolor = ACCENT, "В ЭФИРЕ", "#06210f"
+        lamp = QRectF(pad, yb, w - 2 * pad, lamp_h)
+        p.setBrush(QColor(color))
+        p.drawRoundedRect(lamp, lamp_h / 3, lamp_h / 3)
+        f = QFont(lamp_font)
+        while f.pixelSize() > 7 and QFontMetrics(f).horizontalAdvance(text) > lamp.width() - 4:
+            f.setPixelSize(f.pixelSize() - 1)                      # узкая плитка — буквы мельче
+        p.setFont(f)
+        p.setPen(QColor(tcolor))
+        p.drawText(lamp, Qt.AlignCenter, text)
         p.end()
 
 
@@ -255,7 +308,7 @@ class ChannelsPanel(QWidget):
         n = len(self.tiles)
         if not n:
             return
-        tile_w = max(110.0, self.px * 9)
+        tile_w = max(64.0, self.px * 5.2)          # узкие плитки с вертикальными индикаторами
         cols = max(1, min(n, int(max(1, self.width()) // tile_w)))
         rows = -(-n // cols)
         if rows > self.max_rows:                   # рядов не больше max_rows: плитки становятся уже
