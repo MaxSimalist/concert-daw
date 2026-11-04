@@ -354,6 +354,11 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.status_label, 1)
         self.statusBar().addPermanentWidget(self.out_label)
         self.statusBar().addPermanentWidget(self.daw_label)
+        self.show_label = QLabel("")
+        self.show_label.setStyleSheet("color:#36d399;font-weight:800;font-size:15px;padding:0 8px")
+        self.show_label.setToolTip("Секундомер концерта из Concert DAW (запускается там, когда начинает "
+                                   "играть выбранный трек)")
+        self.statusBar().addPermanentWidget(self.show_label)
         self.update_btn = UpdateButton(self, self._update_blocker, lambda: self.project.update_checked,
                                        self._set_update_checked, lambda: self.project.update_auto)
         self.statusBar().addPermanentWidget(self.update_btn)
@@ -1675,7 +1680,19 @@ class MainWindow(QMainWindow):
         self.daw_label.setText(f"DAW: {'●' if c.connected else '○'}")
 
     # ═════════════════════════════ главный цикл ═════════════════════════════
+    def _tick_show_timer(self) -> None:
+        el = self.client.show_elapsed()
+        if el is None:
+            text = ""
+        else:
+            s = int(el)
+            h, m, sec = s // 3600, (s // 60) % 60, s % 60
+            text = f"⏱ {h}:{m:02d}:{sec:02d}" if h else f"⏱ {m:02d}:{sec:02d}"
+        if self.show_label.text() != text:
+            self.show_label.setText(text)
+
     def _tick(self) -> None:
+        self._tick_show_timer()
         for kind, value in self.client.poll():
             if kind == "connection":
                 self.status("Concert DAW подключён" if value else "Связь с Concert DAW потеряна — переподключаюсь",

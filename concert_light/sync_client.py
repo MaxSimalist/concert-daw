@@ -98,6 +98,14 @@ class MasterState:
     s: float = 0.0               # время мастера, к которому относится pos
     seq: int = 0
     received: float = 0.0        # местное время получения
+    # дополнительные поля Concert DAW 1.3+ (у старых версий — пустые)
+    next_id: str = ""
+    next_name: str = ""
+    paused: bool = False
+    playlist: str = ""
+    show_running: bool = False   # секундомер концерта идёт
+    show_elapsed: float = 0.0    # его показание на момент s (время мастера)
+    autocue: bool = False
 
 
 @dataclass
@@ -143,6 +151,13 @@ class SyncClient:
         if not st.playing:
             return st.pos
         return st.pos + (self.master_now(local) - st.s) * st.rate
+
+    def show_elapsed(self, local: Optional[float] = None) -> Optional[float]:
+        """Секундомер концерта Concert DAW прямо сейчас (сек) или None, если он не запущен."""
+        st = self.state
+        if not self.connected or not st.show_running:
+            return None
+        return max(0.0, st.show_elapsed + (self.master_now(local) - st.s))
 
     @property
     def clock_ok(self) -> bool:
@@ -276,7 +291,12 @@ class SyncClient:
                              duration=float(msg.get("duration", 0.0)), pos=float(msg.get("pos", 0.0)),
                              playing=bool(msg.get("playing")), countin=float(msg.get("countin", 0.0)),
                              rate=float(msg.get("rate", 1.0)), s=float(msg.get("s", 0.0)),
-                             seq=int(msg.get("seq", 0)), received=self.now())
+                             seq=int(msg.get("seq", 0)), received=self.now(),
+                             next_id=str(msg.get("next_id", "")), next_name=str(msg.get("next_name", "")),
+                             paused=bool(msg.get("paused", False)), playlist=str(msg.get("playlist", "")),
+                             show_running=bool(msg.get("show_running", False)),
+                             show_elapsed=float(msg.get("show_elapsed", 0.0) or 0.0),
+                             autocue=bool(msg.get("autocue", False)))
             self.state = st
             if st.seq != prev.seq or st.song_id != prev.song_id or st.playing != prev.playing:
                 self._events.put(("transport", st))

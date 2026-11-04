@@ -213,7 +213,8 @@ class SyncServer:
             # ответ — сразу, с текущим временем мастера (для расчёта разницы часов)
             c.send(encode({"t": "pong", "c": msg.get("c"), "s": time.monotonic()}))
         elif t == "hello":
-            c.name = f"{msg.get('name') or c.addr[0]} ({c.addr[0]})"
+            app = str(msg.get("app") or "").replace("Concert ", "")
+            c.name = (f"{app}: " if app else "") + f"{msg.get('name') or c.addr[0]} ({c.addr[0]})"
         elif t == "get_songs" and self._songs_msg:
             c.send(self._songs_msg)
 
@@ -257,15 +258,21 @@ class SyncServer:
             self._broadcast(data)
 
     def publish_state(self, song_id: str, song_name: str, duration: float, pos: float,
-                      playing: bool, counting_in: float = 0.0) -> None:
-        """Вызывать часто (каждый кадр GUI). Отправка — при изменении сразу, иначе 10 раз/с."""
+                      playing: bool, counting_in: float = 0.0, extra: Optional[dict] = None) -> None:
+        """Вызывать часто (каждый кадр GUI). Отправка — при изменении сразу, иначе 10 раз/с.
+        extra — дополнительные поля (следующий трек, пауза, секундомер концерта…): старые
+        клиенты их просто не читают, поэтому версия протокола та же."""
         now = time.monotonic()
         state = {"t": "state", "song_id": song_id or "", "song_name": song_name or "",
                  "duration": round(float(duration), 4), "pos": round(float(pos), 4),
                  "playing": bool(playing), "countin": round(float(counting_in), 3), "rate": 1.0}
+        if extra:
+            state.update(extra)
         last = self._last_state
         changed = (not last or last.get("song_id") != state["song_id"] or last.get("playing") != playing
-                   or last.get("duration") != state["duration"])
+                   or last.get("duration") != state["duration"]
+                   or any(last.get(k) != state.get(k) for k in ("next_id", "paused", "playlist",
+                                                                  "show_running", "song_name")))
         if not changed and last:
             # перемотка: позиция ушла от ожидаемой больше чем на 0.15 с
             expect = last["pos"] + ((now - last["s"]) if last.get("playing") else 0.0)

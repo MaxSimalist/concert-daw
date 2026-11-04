@@ -37,6 +37,7 @@ from x32_osc import FxTempo, X32Osc
 from gui_settings import SettingsDialog
 from gui_rec_channels import RecChannelsDialog, summary_text
 from gui_update import UpdateButton
+from show_timer import ShowTimer, fmt_clock
 from gui_song_editor import SongEditorDialog
 from gui_widgets import TrackStrip, no_focus
 from model import (TITLE_SOURCE, ConfigStore, Playlist, Song, TrackConfig, file_title, is_audio_file,
@@ -337,6 +338,8 @@ class MainWindow(QMainWindow):
         self.store = store or ConfigStore()
         self.cfg = self.store.load()
         TITLE_SOURCE["value"] = self.cfg.title_source     # откуда брать название нового трека
+        self.show_timer = ShowTimer(self.cfg.show_mode, self.cfg.show_song, self.cfg.show_started)
+        self._show_last_audible = ""
         self.engine = AudioEngine()
         self.engine.samplerate = self.cfg.samplerate
         self.engine.blocksize = self.cfg.blocksize
@@ -533,12 +536,20 @@ class MainWindow(QMainWindow):
         lay.addLayout(info, 1)
 
         times = QVBoxLayout()
+        self.show_label = QPushButton("⏱ --:--")
+        self.show_label.setObjectName("showTimer")
+        self.show_label.setFlat(True)
+        self.show_label.setStyleSheet("QPushButton#showTimer{color:#7f8b97;font-weight:700;border:none;"
+                                      "padding:0 2px;text-align:right}"
+                                      "QPushButton#showTimer[running=\"true\"]{color:#36d399}")
+        self.show_label.clicked.connect(self._show_timer_menu)
         self.time_label = QLabel("00:00")
         self.time_label.setObjectName("timeLabel")
         self.time_label.setAlignment(Qt.AlignRight)
         self.remain_label = QLabel("-00:00")
         self.remain_label.setObjectName("remainLabel")
         self.remain_label.setAlignment(Qt.AlignRight)
+        times.addWidget(self.show_label, 0, Qt.AlignRight)
         times.addWidget(self.time_label)
         times.addWidget(self.remain_label)
         lay.addLayout(times)
@@ -556,7 +567,8 @@ class MainWindow(QMainWindow):
         lay.addLayout(side)
 
         no_focus(self.prev_btn, self.play_btn, self.pause_btn, self.stop_btn, self.next_btn, self.rec_btn,
-                 self.autocue_btn, self.settings_btn, self.progress, self.metro_btn, self.countin_btn)
+                 self.autocue_btn, self.settings_btn, self.progress, self.metro_btn, self.countin_btn,
+                 self.show_label)
         self.rec_btn.clicked.connect(self._on_rec_clicked)
         self.rec_btn.setContextMenuPolicy(Qt.CustomContextMenu)
         self.rec_btn.customContextMenuRequested.connect(lambda _p: self.pick_rec_channels())
@@ -1887,27 +1899,109 @@ class MainWindow(QMainWindow):
             pos = eng.position_seconds - eng.countin_seconds_left
             if playing:
                 pos -= eng.output_latency
-            self.sync.publish_state(sg.id, sg.name, loaded.duration, pos, playing, eng.countin_seconds_left)
+            self.sync.publish_state(sg.id, sg.name, loaded.duration, pos, playing, eng.countin_seconds_left,
+                                    extra=self._sync_extra())
         else:
             sg = self._song_by_id(self.cued_id)
             self.sync.publish_state(sg.id if sg else "", sg.name if sg else "",
-                                    sg.output_duration if sg else 0.0, 0.0, False)
+                                    sg.output_duration if sg else 0.0, 0.0, False, extra=self._sync_extra())
+
+    def _sync_extra(self) -> dict:
+        """Для табло и других программ: следующий трек, пауза, плейлист, секундомер, маркер."""
+        nxt = self._neighbor(+1)
+        loc = self._locate(self.cued_id)
+        return {"next_id": nxt.id if nxt else "", "next_name": nxt.name if nxt else "",
+                "paused": self._is_paused(),
+                "playlist": loc[0].name if loc else (self.shown_playlist.name if self.shown_playlist else ""),
+                "show_running": self.show_timer.running,
+                "show_elapsed": round(self.show_timer.elapsed(), 2),
+                "autocue": bool(self.cfg.auto_cue)}
 
     def _update_video_label(self) -> None:
         if not self.cfg.video_sync_on:
             text = ""
         elif not self.sync.running:
-            text = "Видео: ошибка"
+            text = "Сеть: ошибка"
         else:
             n = len(self.sync.clients)
-            text = f"Видео: {n} подкл." if n else "Видео: ждёт"
+            text = f"Сеть: {n} подкл." if n else "Сеть: ждёт"
         if self.video_label.text() != text:
             self.video_label.setText(text)
-            self.video_label.setToolTip("Concert Video: " + (", ".join(self.sync.clients) or "не подключено")
+            self.video_label.setToolTip("Подключены (Concert Video, Light, Stage):\n"
+                                        + ("\n".join(self.sync.clients) or "никого")
                                         + f"\nПорт {self.cfg.video_sync_port}. Настройки → Видео")
+
+    # ═══════════════════════════ секундомер концерта ═══════════════════════════
+    def _show_timer_tick(self) -> None:
+        """Начал звучать трек (после отсчёта) — может, пора запускать секундомер."""
+        eng = self.engine
+        audible = ""
+        if eng.is_playing and eng.song is not None and eng.countin_seconds_left <= 0:
+            audible = eng.song.song.id
+        if audible and audible != self._show_last_audible:
+            loc = self._locate(audible)
+            if self.show_timer.on_track_started(audible, loc[1] if loc else -1):
+                self.cfg.show_started = self.show_timer.started_at
+                self._schedule_save()
+                self._status("Секундомер концерта запущен — время пошло")
+        self._show_last_audible = audible
+        sh = self.show_timer
+        text = f"⏱ {fmt_clock(sh.elapsed())}" if sh.running else "⏱ --:--"
+        if self.show_label.text() != text:
+            self.show_label.setText(text)
+            if bool(self.show_label.property("running")) != sh.running:
+                self.show_label.setProperty("running", sh.running)
+                repolish(self.show_label)
+            start_name = ""
+            if sh.mode == "song":
+                sg = self._song_by_id(sh.song_id)
+                start_name = sg.name if sg else "трек удалён"
+            self.show_label.setToolTip("Секундомер концерта — " + sh.describe(start_name)
+                                       + ".\nКлик — запустить/сбросить, выбрать, с какого трека запускать")
+
+    def _show_timer_menu(self) -> None:
+        sh = self.show_timer
+        m = QMenu(self)
+        a_start = m.addAction("Запустить сейчас" if not sh.running else "Перезапустить с нуля сейчас")
+        a_reset = m.addAction("Сбросить (остановить)")
+        a_reset.setEnabled(sh.running)
+        m.addSeparator()
+        modes = {}
+        cur = self._song_by_id(self.cued_id)
+        for key, text in (("first", "Запускать с первого трека плейлиста"),
+                          ("song", f"Запускать с текущего трека: «{cur.name}»" if cur else
+                           "Запускать с указанного трека (сначала выберите трек)"),
+                          ("manual", "Запускать только вручную")):
+            a = m.addAction(text)
+            a.setCheckable(True)
+            a.setChecked(sh.mode == key and (key != "song" or (cur is not None and sh.song_id == cur.id)))
+            a.setEnabled(key != "song" or cur is not None)
+            modes[a] = key
+        if sh.mode == "song" and (cur is None or sh.song_id != cur.id):
+            sg = self._song_by_id(sh.song_id)
+            info = m.addAction(f"Сейчас: с трека «{sg.name if sg else 'удалён'}»")
+            info.setEnabled(False)
+        chosen = m.exec(self.show_label.mapToGlobal(self.show_label.rect().bottomLeft()))
+        if chosen is None:
+            return
+        if chosen is a_start:
+            sh.start()
+        elif chosen is a_reset:
+            if QMessageBox.question(self, "Секундомер", "Сбросить секундомер концерта?") \
+                    != QMessageBox.StandardButton.Yes:
+                return
+            sh.reset()
+        elif chosen in modes:
+            sh.mode = modes[chosen]
+            if sh.mode == "song" and cur is not None:
+                sh.song_id = cur.id
+        self.cfg.show_mode, self.cfg.show_song, self.cfg.show_started = sh.mode, sh.song_id, sh.started_at
+        self._schedule_save()
+        self.show_label.setText("")              # обновить надпись и подсказку на следующем кадре
 
     def _on_tick(self) -> None:
         eng = self.engine
+        self._show_timer_tick()
         if self.sync.running:
             self._publish_state()
             self._sync_tick += 1

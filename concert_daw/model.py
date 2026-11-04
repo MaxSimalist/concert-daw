@@ -352,6 +352,10 @@ class AppConfig:
     rec_names: dict = field(default_factory=dict)  # имена входов: {"5": "Вокал"} → Ch05 Вокал.wav
     video_sync_on: bool = True    # мастер-часы для видео-программы Concert Video (по сети)
     video_sync_port: int = 47810
+    # ── секундомер концерта ──
+    show_mode: str = "first"     # "first" — с первого трека плейлиста, "song" — с указанного, "manual"
+    show_song: str = ""          # id трека для режима "song"
+    show_started: float = 0.0    # time.time() старта; 0 — не запущен (переживает перезапуск программы)
     update_auto: bool = True      # проверять обновления при запуске
     update_checked: float = 0.0   # когда последний раз проверяли обновления на GitHub (time.time())
     rec_to_song: bool = True      # после записи — каналы в трек фейдерами (выход на пульт, EQ, компрессор)

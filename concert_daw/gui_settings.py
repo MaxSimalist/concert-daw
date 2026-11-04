@@ -419,7 +419,7 @@ class SettingsDialog(QDialog):
                       "(кабель или Wi-Fi). В Concert Video нажмите «Найти Concert DAW».")
         info.setWordWrap(True)
         form.addRow(info)
-        self.video_cb = QCheckBox("Разрешить подключение видео-программы (мастер-часы)")
+        self.video_cb = QCheckBox("Разрешить подключение видео-программы и табло (мастер-часы)")
         self.video_cb.setChecked(self.cfg.video_sync_on)
         form.addRow(self.video_cb)
         self.video_port = QSpinBox()

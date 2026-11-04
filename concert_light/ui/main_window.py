@@ -61,6 +61,10 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self.daw_label = QLabel("")
         self.statusBar().addPermanentWidget(self.daw_label)
+        self.show_label = QLabel("")
+        self.show_label.setStyleSheet("color:#36d399;font-weight:800;font-size:15px;padding:0 8px")
+        self.show_label.setToolTip("Секундомер концерта из Concert DAW")
+        self.statusBar().addPermanentWidget(self.show_label)
         self.update_btn = UpdateButton(
             self, self._update_blocker, lambda: float(self.settings.update_checked or 0),
             lambda t: self.settings.set(update_checked=t), lambda: bool(self.settings.update_auto))
@@ -157,6 +161,13 @@ class MainWindow(QMainWindow):
             self.daw_label.setText(f"<span style='color:#e44'>●</span> DAW: нет связи ")
         else:
             self.daw_label.setText("")
+        el = c.show_elapsed()                # секундомер концерта Concert DAW
+        if el is None:
+            self.show_label.setText("")
+        else:
+            sec = int(el)
+            h, m, ss = sec // 3600, (sec // 60) % 60, sec % 60
+            self.show_label.setText(f"⏱ {h}:{m:02d}:{ss:02d}" if h else f"⏱ {m:02d}:{ss:02d}")
         if self.bo.isChecked() != e.blackout:  # blackout могла переключить кьюшка
             self.bo.blockSignals(True)
             self.bo.setChecked(e.blackout)
